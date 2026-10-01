@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Globalization;
 using ApiSiteAnalyzer.Sites;
 using Microsoft.Data.Sqlite;
 
@@ -123,6 +124,18 @@ public sealed class OverviewStat
 
     /// <summary>近十次窗口内的记录条数（不足十条时即实际条数）。</summary>
     public long RecentSampleCount { get; set; }
+
+    /// <summary>再往前十次窗口（第 11–20 次）内的记录条数——卡片对比行的样本数。</summary>
+    public long PrevSampleCount { get; set; }
+
+    /// <summary>再往前十次窗口（第 11–20 次）的平均首字延迟（毫秒）。</summary>
+    public double PrevAvgFirstTokenMs { get; set; }
+
+    /// <summary>再往前十次窗口（第 11–20 次）的平均耗时（秒）。</summary>
+    public double PrevAvgUseTime { get; set; }
+
+    /// <summary>再往前十次窗口（第 11–20 次）的平均输出速率（token/秒）。</summary>
+    public double PrevAvgSpeedTps { get; set; }
 }
 
 /// <summary>库内一条已探明请求 ID（去重后）及其出现时刻。</summary>
@@ -146,6 +159,8 @@ public sealed class Db : IDisposable
 {
     /// <summary>当前库结构版本（结构变更时递增——不匹配则备份旧库并重建）。</summary>
     private const int SchemaVersion = 2;
+    /// <summary>按天图表的补齐窗口（天）——记录跨度超过它时只铺最近这么多天。</summary>
+    private const int ByDayWindowDays = 31;
 
     /// <summary>连接。</summary>
     private readonly SqliteConnection _conn;
@@ -477,10 +492,10 @@ ON CONFLICT (site_id) DO UPDATE SET fetched_at=excluded.fetched_at, total_count=
         using (var cmd = _conn.CreateCommand())
         {
             cmd.CommandText = @"
-    SELECT COUNT(*), COALESCE(SUM(quota),0), COALESCE(SUM(prompt_tokens),0),
-           COALESCE(SUM(completion_tokens),0), COALESCE(SUM(cache_tokens),0),
-           COUNT(DISTINCT CASE WHEN request_id <> '' THEN request_id END)
-    FROM usage_log WHERE site_id=$site" + BuildTypeFilter(cmd, types) + ";";
+        SELECT COUNT(*), COALESCE(SUM(quota),0), COALESCE(SUM(prompt_tokens),0),
+               COALESCE(SUM(completion_tokens),0), COALESCE(SUM(cache_tokens),0),
+               COUNT(DISTINCT CASE WHEN request_id <> '' THEN request_id END)
+        FROM usage_log WHERE site_id=$site" + BuildTypeFilter(cmd, types) + ";";
             cmd.Parameters.AddWithValue("$site", siteId);
 
             using SqliteDataReader reader = cmd.ExecuteReader();
@@ -495,17 +510,23 @@ ON CONFLICT (site_id) DO UPDATE SET fetched_at=excluded.fetched_at, total_count=
             }
         }
 
-        // [段2] 近十次请求的平均——按时刻倒序取窗口，与「最近记录」表同序
+        // [段2] 两个十次窗口的平均——按时刻倒序（与「最近记录」表同序）取前二十条，row_number 切成两段：
+        //       近十次（1–10）与再往前十次（11–20）；两段口径一致（>0 过滤——站点偶给 0 / 负值）
         using (var cmd = _conn.CreateCommand())
         {
             cmd.CommandText = @"
-    SELECT COUNT(*),
-           COALESCE(AVG(CASE WHEN first_token_ms > 0 THEN first_token_ms END), 0),
-           COALESCE(AVG(CASE WHEN use_time > 0 THEN use_time END), 0),
-           COALESCE(AVG(CASE WHEN speed_tps > 0 THEN speed_tps END), 0)
-    FROM (SELECT first_token_ms, use_time, speed_tps FROM usage_log
-          WHERE site_id=$site" + BuildTypeFilter(cmd, types) + @"
-          ORDER BY created_at DESC, remote_id DESC LIMIT 10);";
+        SELECT COALESCE(SUM(CASE WHEN rn <= 10 THEN 1 ELSE 0 END), 0),
+               COALESCE(AVG(CASE WHEN rn <= 10 AND first_token_ms > 0 THEN first_token_ms END), 0),
+               COALESCE(AVG(CASE WHEN rn <= 10 AND use_time > 0 THEN use_time END), 0),
+               COALESCE(AVG(CASE WHEN rn <= 10 AND speed_tps > 0 THEN speed_tps END), 0),
+               COALESCE(SUM(CASE WHEN rn > 10 THEN 1 ELSE 0 END), 0),
+               COALESCE(AVG(CASE WHEN rn > 10 AND first_token_ms > 0 THEN first_token_ms END), 0),
+               COALESCE(AVG(CASE WHEN rn > 10 AND use_time > 0 THEN use_time END), 0),
+               COALESCE(AVG(CASE WHEN rn > 10 AND speed_tps > 0 THEN speed_tps END), 0)
+        FROM (SELECT first_token_ms, use_time, speed_tps,
+                     ROW_NUMBER() OVER (ORDER BY created_at DESC, remote_id DESC) AS rn
+              FROM usage_log WHERE site_id=$site" + BuildTypeFilter(cmd, types) + @")
+        WHERE rn <= 20;";
             cmd.Parameters.AddWithValue("$site", siteId);
 
             using SqliteDataReader reader = cmd.ExecuteReader();
@@ -515,6 +536,10 @@ ON CONFLICT (site_id) DO UPDATE SET fetched_at=excluded.fetched_at, total_count=
                 stat.RecentAvgFirstTokenMs = reader.GetDouble(1);
                 stat.RecentAvgUseTime = reader.GetDouble(2);
                 stat.RecentAvgSpeedTps = reader.GetDouble(3);
+                stat.PrevSampleCount = reader.GetInt64(4);
+                stat.PrevAvgFirstTokenMs = reader.GetDouble(5);
+                stat.PrevAvgUseTime = reader.GetDouble(6);
+                stat.PrevAvgSpeedTps = reader.GetDouble(7);
             }
         }
 
@@ -592,22 +617,95 @@ ON CONFLICT (site_id) DO UPDATE SET fetched_at=excluded.fetched_at, total_count=
         return GroupBy(siteId, "token_name", types, limit);
     }
 
-    /// <summary>按天聚合（本地时区）。</summary>
+    /// <summary>按天聚合（本地时区）。**空档补齐**——从最早记录日逐日铺到「今天 / 最晚记录日」，无记录日给 0 行；跨度超过窗口（31 天）时只铺最近这么多天。</summary>
     /// <param name="siteId">站点键。</param>
     /// <param name="types">记录类型白名单。</param>
     /// <returns>聚合行（按日期升序，Name = yyyy-MM-dd）。</returns>
     public List<AggregateRow> ByDay(string siteId, IReadOnlyList<int> types)
     {
-        return GroupByExpr(siteId, "strftime('%Y-%m-%d', created_at, 'unixepoch', 'localtime')", types, 0, true);
+        List<AggregateRow> rows = GroupByExpr(siteId, "strftime('%Y-%m-%d', created_at, 'unixepoch', 'localtime')", types, 0, true);
+        if (rows.Count == 0)
+        {
+            return rows;
+        }
+
+        // [段1] 补齐区间——终点取「今天」与「最晚记录日」的较晚者；起点不早于窗口下界
+        DateTime today = DateTime.Today;
+        DateTime first = DateTime.ParseExact(rows[0].Name, "yyyy-MM-dd", CultureInfo.InvariantCulture);
+        DateTime last = DateTime.ParseExact(rows[rows.Count - 1].Name, "yyyy-MM-dd", CultureInfo.InvariantCulture);
+        DateTime end = today;
+        if (last > end)
+        {
+            end = last;
+        }
+
+        DateTime start = end.AddDays(-(ByDayWindowDays - 1));
+        if (first > start)
+        {
+            start = first;
+        }
+
+        // [段2] 已有行建索引——逐日铺满，无记录日补 0 行（空档补齐）
+        Dictionary<string, AggregateRow> known = new Dictionary<string, AggregateRow>(StringComparer.Ordinal);
+        foreach (AggregateRow row in rows)
+        {
+            known[row.Name] = row;
+        }
+
+        List<AggregateRow> filled = new List<AggregateRow>();
+        for (DateTime day = start; day <= end; day = day.AddDays(1))
+        {
+            string key = day.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+            AggregateRow? hit = null;
+            if (known.TryGetValue(key, out hit))
+            {
+                filled.Add(hit);
+            }
+            else
+            {
+                filled.Add(new AggregateRow { Name = key });
+            }
+        }
+
+        return filled;
     }
 
-    /// <summary>按小时聚合（本地时区，跨天累计）。</summary>
+    /// <summary>按小时聚合（本地时区，跨天累计）。**空档补齐**——固定 00–23 全 24 行，无记录小时给 0 行。</summary>
     /// <param name="siteId">站点键。</param>
     /// <param name="types">记录类型白名单。</param>
     /// <returns>聚合行（按小时升序，Name = 00..23）。</returns>
     public List<AggregateRow> ByHour(string siteId, IReadOnlyList<int> types)
     {
-        return GroupByExpr(siteId, "strftime('%H', created_at, 'unixepoch', 'localtime')", types, 0, true);
+        List<AggregateRow> rows = GroupByExpr(siteId, "strftime('%H', created_at, 'unixepoch', 'localtime')", types, 0, true);
+        if (rows.Count == 0)
+        {
+            return rows;
+        }
+
+        // [段1] 已有行建索引——逐小时铺满，无记录小时补 0 行（空档补齐）
+        Dictionary<string, AggregateRow> known = new Dictionary<string, AggregateRow>(StringComparer.Ordinal);
+        foreach (AggregateRow row in rows)
+        {
+            known[row.Name] = row;
+        }
+
+        // [段2] 00–23 全 24 行（跨天累计口径不变）
+        List<AggregateRow> filled = new List<AggregateRow>();
+        for (int hour = 0; hour < 24; hour = hour + 1)
+        {
+            string key = hour.ToString("00", CultureInfo.InvariantCulture);
+            AggregateRow? hit = null;
+            if (known.TryGetValue(key, out hit))
+            {
+                filled.Add(hit);
+            }
+            else
+            {
+                filled.Add(new AggregateRow { Name = key });
+            }
+        }
+
+        return filled;
     }
 
     /// <summary>按分组聚合。</summary>

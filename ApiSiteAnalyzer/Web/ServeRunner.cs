@@ -173,6 +173,7 @@ public static class ServeRunner
             {
                 LoginState login = await queue.RunAsync(() => session.ProbeLoginAsync(site, CancellationToken.None)).ConfigureAwait(false);
                 state.SetBalance(site.Id, login.Quota);
+                state.SetLogin(site.Id, login.LoggedIn, login.Username, login.LoggedIn ? "" : login.Message);
                 return Results.Json(new
                 {
                     ok = true,
@@ -246,6 +247,7 @@ public static class ServeRunner
             try
             {
                 LoginState probe = await queue.RunAsync(() => session.ProbeLoginAsync(direct, CancellationToken.None)).ConfigureAwait(false);
+                state.SetLogin(siteId, probe.LoggedIn, probe.Username, probe.LoggedIn ? "" : probe.Message);
                 return Results.Json(new
                 {
                     ok = true,
@@ -362,6 +364,10 @@ public static class ServeRunner
                     recentAvgUseTime = overview.RecentAvgUseTime,
                     recentAvgSpeedTps = overview.RecentAvgSpeedTps,
                     recentSampleCount = overview.RecentSampleCount,
+                    prevSampleCount = overview.PrevSampleCount,
+                    prevAvgFirstTokenMs = overview.PrevAvgFirstTokenMs,
+                    prevAvgUseTime = overview.PrevAvgUseTime,
+                    prevAvgSpeedTps = overview.PrevAvgSpeedTps,
                 },
                 byModel = byModel.Select(r => Map(r, unit)),
                 byDay = byDay.Select(r => Map(r, unit)),
@@ -632,6 +638,10 @@ public static class ServeRunner
                 recentAvgUseTime = all.RecentAvgUseTime,
                 recentAvgSpeedTps = all.RecentAvgSpeedTps,
                 recentSampleCount = all.RecentSampleCount,
+                prevSampleCount = all.PrevSampleCount,
+                prevAvgFirstTokenMs = all.PrevAvgFirstTokenMs,
+                prevAvgUseTime = all.PrevAvgUseTime,
+                prevAvgSpeedTps = all.PrevAvgSpeedTps,
             },
             byModel = all.ByModel.Select(MapMerged),
             byDay = all.ByDay.Select(MapMerged),
@@ -772,6 +782,8 @@ public static class ServeRunner
         {
             if (summary.NotLoggedIn)
             {
+                // 掉登录在总览站点块上直接可见——不靠「采集失败」这类间接信号去推断
+                state.SetLogin(site.Id, false, "", "未登录——请点「去登录」在浏览器里登录后重试");
                 state.Fail("未登录——请点「去登录」在浏览器里登录后重试");
             }
             else
@@ -781,6 +793,16 @@ public static class ServeRunner
 
             return summary;
         }
+
+        // [段1] 登录态——直连通道站点拿不到账号名，沿用上次探活记下的那个（不因一次采集把名字擦掉）
+        string username = summary.Username;
+        if (username.Length == 0)
+        {
+            LoginSnapshot? previous = state.LoginOf(site.Id);
+            username = previous is null ? "" : previous.Username;
+        }
+
+        state.SetLogin(site.Id, true, username, "");
 
         long rows = db.Count(site.Id);
         db.MarkFetched(site.Id, rows);

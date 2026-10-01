@@ -113,6 +113,18 @@ public sealed class AllSitesResult
     /// <summary>近十次请求的平均输出速率（token/秒）。</summary>
     public double RecentAvgSpeedTps { get; set; }
 
+    /// <summary>再往前十次窗口（第 11–20 次）内的记录条数——卡片对比行的样本数。</summary>
+    public long PrevSampleCount { get; set; }
+
+    /// <summary>再往前十次窗口（第 11–20 次）的平均首字延迟（毫秒）。</summary>
+    public double PrevAvgFirstTokenMs { get; set; }
+
+    /// <summary>再往前十次窗口（第 11–20 次）的平均耗时（秒）。</summary>
+    public double PrevAvgUseTime { get; set; }
+
+    /// <summary>再往前十次窗口（第 11–20 次）的平均输出速率（token/秒）。</summary>
+    public double PrevAvgSpeedTps { get; set; }
+
     /// <summary>按模型（跨站合并，按金额倒序）。</summary>
     public List<MergedRow> ByModel { get; set; } = new List<MergedRow>();
 
@@ -229,12 +241,18 @@ public static class SiteAggregate
         recent.Sort(CompareRecent);
         result.Recent = recent.Take(RecentLimit).ToList();
 
-        // [段3] 近十次窗口——口径与单站一致：按时刻倒序取窗口，再对 >0 的值取平均（站点偶给 0 / 负值）
+        // [段3] 两个十次窗口——口径与单站一致：按时刻倒序取窗口，再对 >0 的值取平均（站点偶给 0 / 负值）
+        //       近十次（1–10）与再往前十次（11–20）——后者作卡片对比行的参照
         List<UsageRecord> window = recent.Take(10).ToList();
+        List<UsageRecord> prevWindow = recent.Skip(10).Take(10).ToList();
         result.RecentSampleCount = window.Count;
         result.RecentAvgFirstTokenMs = Average(window.Where(r => r.FirstTokenMs > 0).Select(r => (double)r.FirstTokenMs));
         result.RecentAvgUseTime = Average(window.Where(r => r.UseTime > 0).Select(r => (double)r.UseTime));
         result.RecentAvgSpeedTps = Average(window.Where(r => r.SpeedTps > 0).Select(r => r.SpeedTps));
+        result.PrevSampleCount = prevWindow.Count;
+        result.PrevAvgFirstTokenMs = Average(prevWindow.Where(r => r.FirstTokenMs > 0).Select(r => (double)r.FirstTokenMs));
+        result.PrevAvgUseTime = Average(prevWindow.Where(r => r.UseTime > 0).Select(r => (double)r.UseTime));
+        result.PrevAvgSpeedTps = Average(prevWindow.Where(r => r.SpeedTps > 0).Select(r => r.SpeedTps));
 
         // [段4] 分组行排序与截断——时间轴按名称升序，其余按金额倒序
         result.ByModel = Top(result.ByModel, ModelLimit);

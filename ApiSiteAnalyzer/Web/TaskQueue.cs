@@ -83,6 +83,9 @@ public sealed class PanelState
     /// <summary>各站点最近一次探到的真实余额（quota 单位；键 = 站点键，0 = 未取到）。</summary>
     private readonly Dictionary<string, long> _balances = new Dictionary<string, long>(StringComparer.Ordinal);
 
+    /// <summary>各站点最近一次探到的登录态（键 = 站点键）——总览站点块据此显示「已登录 / 未登录 / 未探测」。</summary>
+    private readonly Dictionary<string, LoginSnapshot> _logins = new Dictionary<string, LoginSnapshot>(StringComparer.Ordinal);
+
     /// <summary>阶段：idle / running / done / failed。</summary>
     private string _phase = "idle";
 
@@ -196,6 +199,39 @@ public sealed class PanelState
         }
     }
 
+    /// <summary>
+    /// 记下某站点的登录态（探测 / 采集后调用）——总览站点块据此显示各站是否掉登录。
+    /// 直连通道站点的「登录态」等价于 API key 是否有效（该通道没有浏览器登录这回事）。
+    /// </summary>
+    /// <param name="siteId">站点键。</param>
+    /// <param name="loggedIn">是否有效（浏览器通道 = 已登录；直连通道 = key 有效）。</param>
+    /// <param name="username">账号名（拿不到传空串）。</param>
+    /// <param name="message">未登录 / 无效的原因（正常时传空串）。</param>
+    public void SetLogin(string siteId, bool loggedIn, string username, string message)
+    {
+        lock (_gate)
+        {
+            _logins[siteId] = new LoginSnapshot
+            {
+                LoggedIn = loggedIn,
+                Username = username,
+                Message = message,
+                CheckedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
+            };
+        }
+    }
+
+    /// <summary>取某站点最近一次探到的登录态（null = 从未探测过——如实显示「未探测」，不冒充已登录）。</summary>
+    /// <param name="siteId">站点键。</param>
+    /// <returns>登录态快照；从未探测返回 null。</returns>
+    public LoginSnapshot? LoginOf(string siteId)
+    {
+        lock (_gate)
+        {
+            return _logins.TryGetValue(siteId, out LoginSnapshot? value) ? value : null;
+        }
+    }
+
     /// <summary>记下自动采集总开关（各站共用一个开关；间隔与降级各站独立）。</summary>
     /// <param name="enabled">是否开启。</param>
     public void SetAutoEnabled(bool enabled)
@@ -244,6 +280,7 @@ public sealed class PanelState
             var balances = new Dictionary<string, long>(_balances, StringComparer.Ordinal);
             long current = balances.TryGetValue(_siteId, out long value) ? value : 0;
             var autoSites = new Dictionary<string, AutoState>(_autoStates, StringComparer.Ordinal);
+            var logins = new Dictionary<string, LoginSnapshot>(_logins, StringComparer.Ordinal);
             return new
             {
                 ok = true,
@@ -254,6 +291,7 @@ public sealed class PanelState
                 running = _phase == "running",
                 balance = current,
                 balances = balances,
+                logins = logins,
                 autoEnabled = _autoEnabled,
                 autoSites = autoSites,
             };
@@ -284,4 +322,23 @@ public sealed class AutoState
 
     /// <summary>下一次到点时刻（yyyy-MM-dd HH:mm:ss；空 = 未排）。</summary>
     public string NextAt { get; set; } = "";
+}
+
+/// <summary>
+/// 一个站点的登录态快照（面板显示用）——最近一次探测 / 采集时的结论。
+/// 浏览器通道站点 = 是否已登录；直连通道站点 = API key 是否有效（该通道没有浏览器登录这回事）。
+/// </summary>
+public sealed class LoginSnapshot
+{
+    /// <summary>是否有效（浏览器通道 = 已登录；直连通道 = key 有效）。</summary>
+    public bool LoggedIn { get; set; }
+
+    /// <summary>账号名（拿不到留空）。</summary>
+    public string Username { get; set; } = "";
+
+    /// <summary>未登录 / 无效时的原因（正常时为空）。</summary>
+    public string Message { get; set; } = "";
+
+    /// <summary>本次结论的时刻（yyyy-MM-dd HH:mm:ss）。</summary>
+    public string CheckedAt { get; set; } = "";
 }

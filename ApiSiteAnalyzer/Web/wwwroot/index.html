@@ -81,8 +81,14 @@
   .auto-warn{color:var(--gold)}
   .auto-bad{color:#ff8a8a}
   .tag.bad{background:#3a1f24;color:#ff8a8a}
-  /* 输入列下方小字：A（命中缓存 B）——A = 输入 − 缓存（未命中部分） */
+  /* 输入下方小字（最近记录列与「输入 Token」卡片共用）：A（命中缓存 B）——A = 输入 − 缓存（未命中部分） */
   .cacheline{font-size:11px;color:var(--gold);font-weight:400;line-height:1.35}
+  .card .cacheline{margin-top:2px}
+  /* 卡片对比行（近十次 vs 再往前十次）：左侧参照说明，右侧百分比——好为绿、差为红、持平为灰 */
+  .deltaline{display:flex;justify-content:space-between;gap:6px;font-size:11px;font-weight:400;line-height:1.35;
+    margin-top:2px;color:var(--dim)}
+  .deltaline.good{color:var(--ok)}
+  .deltaline.bad{color:var(--bad)}
   /* 可点卡片——点开逐条明细弹窗 */
   .card.clickable{cursor:pointer;transition:border-color .15s}
   .card.clickable:hover{border-color:var(--accent)}
@@ -268,13 +274,16 @@
 <script>
 const $ = (id) => document.getElementById(id);
 const TYPE_NAME = {1:'充值',2:'消费',3:'管理',4:'系统',5:'错误',6:'退款',7:'登录'};
-/* 总览键——下拉第一项，合并全部站点的记录；不是真实站点（不可探测 / 不可采集） */
-const ALL_SITE = '__all__';
+/* 总览键——下拉第一项，合并全部站点的记录；不是真实站点（不可探测 / 不可采集）
+   取值必须与服务端 ServeRunner.AllSitesKey 一致（后端按 '__all' 分流）——不一致时面板会报「未知站点」 */
+const ALL_SITE = '__all';
 let currentSite = '';
 let timer = null;
 let siteMap = {};
 /* 各站最近一次探到的真实余额（服务端按站点分开记，页面只做显示） */
 let balances = {};
+/* 各站最近一次探到的登录态（服务端按站点分开记——总览站点块据此标出「掉登录」） */
+let logins = {};
 function isAll(){ return currentSite === ALL_SITE; }
 function fmtNum(n){ return (n===null||n===undefined)?'—':Number(n).toLocaleString('zh-CN'); }
 function fmtAmount(v, sym){ return (v===null||v===undefined)?'—':sym + Number(v).toFixed(4); }
@@ -464,29 +473,46 @@ function renderBars(container, rows, sym, opts){
 function renderCards(o, sym){
   const n = o.recentSampleCount || 0;
   const win = n >= 10 ? '近十次' : ('近 ' + n + ' 次');
+  /* 对比行参照窗口——再往前十次（第 11–20 次）的样本数；不足即如实说明，不静默省略 */
+  const pc = o.prevSampleCount || 0;
+  /* 卡片条目：[标签, 值, 弹窗键?, 下方小字 HTML?]——第 4 项供「输入 Token」挂缓存小字、三个均值卡片挂对比行 */
   const items = [
     ['本地记录数', fmtNum(o.count)],
     ['本地消费金额', fmtAmount(o.amount, sym)],
     ['已探明请求 ID', fmtNum(o.requestIdCount), 'requestIds'],
-    ['输入 Token', fmtNum(o.promptTokens)],
+    ['输入 Token', fmtNum(o.promptTokens), null, cacheLine(o)],
     ['输出 Token', fmtNum(o.completionTokens)],
     ['缓存 Token', fmtNum(o.cacheTokens)],
     ['缓存命中率', (o.cacheHitRate*100).toFixed(1) + '%'],
-    [win + '平均首字', Math.round(o.recentAvgFirstTokenMs) + ' ms'],
-    [win + '平均耗时', fmtNum(Math.round(o.recentAvgUseTime*1000)) + ' ms'],
-    [win + '平均速率', o.recentAvgSpeedTps.toFixed(1) + ' t/s'],
+    [win + '平均首字', Math.round(o.recentAvgFirstTokenMs) + ' ms', null, deltaLine(o.recentAvgFirstTokenMs, o.prevAvgFirstTokenMs, pc, true)],
+    [win + '平均耗时', fmtNum(Math.round(o.recentAvgUseTime*1000)) + ' ms', null, deltaLine(o.recentAvgUseTime, o.prevAvgUseTime, pc, true)],
+    [win + '平均速率', o.recentAvgSpeedTps.toFixed(1) + ' t/s', null, deltaLine(o.recentAvgSpeedTps, o.prevAvgSpeedTps, pc, false)],
   ];
   $('cards').innerHTML = items.map(it =>
     '<div class="card' + (it[2] ? ' clickable' : '') + '"' + (it[2] ? ' data-key="' + it[2] + '"' : '') +
-    '><div class="k">'+esc(it[0])+'</div><div class="v">'+esc(it[1])+'</div></div>').join('');
+    '><div class="k">'+esc(it[0])+'</div><div class="v">'+esc(it[1])+'</div>' + (it[3] || '') + '</div>').join('');
 }
 
-/* 输入列下方小黄字：A（命中缓存 B）——A = 输入 − 缓存（未命中部分），B = 缓存 token */
+/* 输入下方小黄字（最近记录列与「输入 Token」卡片共用）：A（命中缓存 B）——A = 输入 − 缓存（未命中部分），B = 缓存 token */
 function cacheLine(r){
   const p = r.promptTokens || 0;
   if(p <= 0) return '';
   const c = r.cacheTokens || 0;
   return '<div class="cacheline">' + fmtNum(p - c) + '（命中缓存 ' + fmtNum(c) + '）</div>';
+}
+
+/* 卡片对比行（近十次 vs 再往前十次）：右侧百分比——首字 / 耗时越小越好，速率越大越好；
+   样本不足或均值不可比时如实说明（不静默省略，也不假报百分比） */
+function deltaLine(cur, prev, prevCount, lowerBetter){
+  if(prevCount < 1) return '<div class="deltaline">较前 10 次 样本不足</div>';
+  if(!(prev > 0) || !(cur > 0)) return '<div class="deltaline">较前 10 次 无有效样本</div>';
+  const pct = Math.round((cur - prev) / prev * 1000) / 10;
+  let cls = '';
+  if(pct !== 0){
+    const better = lowerBetter ? pct < 0 : pct > 0;
+    cls = better ? ' good' : ' bad';
+  }
+  return '<div class="deltaline' + cls + '"><span>较前 10 次</span><span>' + (pct > 0 ? '+' : '') + pct.toFixed(1) + '%</span></div>';
 }
 
 function renderRecent(rows, sym){
@@ -538,6 +564,7 @@ function renderSiteBlocks(sites){
   const el = $('siteBlocks');
   if(!sites || !sites.length){ el.innerHTML = '<div class="muted">未配置站点</div>'; return; }
   el.innerHTML = sites.map(s => {
+    const direct = s.channel === 'apikey';
     let bal, sub;
     if(s.unlimitedBalance){
       bal = '<div class="bal">不设限</div>';
@@ -565,7 +592,21 @@ function renderSiteBlocks(sites){
         autoText = '正常（间隔 ' + a.intervalSeconds + 's）';
       }
     }
+    /* 登录态——服务端记的是「最近一次探测 / 采集」的结论：掉登录直接标红，没探过就如实说未探测 */
+    const lg = logins[s.id];
+    let loginText = '未探测', loginFlag = '';
+    if(lg){
+      if(lg.loggedIn){
+        loginText = (direct ? 'key 有效' : '已登录') + (lg.username ? '（' + lg.username + '）' : '') +
+          (lg.checkedAt ? ' · ' + lg.checkedAt.substring(11, 19) : '');
+      }else{
+        loginText = (direct ? 'key 无效' : '未登录') + (lg.checkedAt ? ' · ' + lg.checkedAt.substring(11, 19) : '');
+        loginFlag = '<span class="tag bad" title="' + esc(lg.message || '') + '">' + (direct ? 'key 无效' : '未登录') + '</span>';
+      }
+    }
     const facts = [
+      ['登录态', loginText],
+      ['下次采集', a && a.nextAt ? a.nextAt.substring(11, 19) : '—'],
       ['本地记录', fmtNum(s.count) + ' 条'],
       ['本地消费', fmtAmount(s.amount, s.currencySymbol)],
       ['库内行数', fmtNum(s.rows)],
@@ -574,7 +615,7 @@ function renderSiteBlocks(sites){
     ];
     return '<div class="siteblock">' +
       '<div class="head"><span class="name">' + esc(s.displayName) + '</span>' +
-      '<span class="tag">' + (s.channel === 'apikey' ? 'API key 直连' : '浏览器') + '</span>' + autoFlag + '</div>' +
+      '<span class="tag">' + (direct ? 'API key 直连' : '浏览器') + '</span>' + autoFlag + loginFlag + '</div>' +
       bal + '<div class="sub">' + esc(sub) + '</div>' +
       '<div class="facts">' + facts.map(f =>
         '<div><span class="k">' + esc(f[0]) + '</span> <span class="v">' + esc(f[1]) + '</span></div>').join('') +
@@ -698,6 +739,8 @@ async function refreshAutoState(){
     balances = p.balances;
     if(!isAll() && balances[currentSite] > 0){ renderBalance(balances[currentSite]); }
   }
+  /* 登录态同余额一样按站点分开记——站点块据此显示各站是否掉登录 */
+  if(p.logins){ logins = p.logins; }
   /* 站点块上的自动采集状态跟着刷新（总览视图） */
   if(isAll() && lastSites){ renderSiteBlocks(lastSites); }
 }

@@ -169,6 +169,7 @@ public sealed class SiteSession
         {
             LoginState login = await ReadLoginStateAsync(session, site, ct).ConfigureAwait(false);
             summary.Balance = login.Quota;
+            summary.Username = login.Username;
             if (!login.LoggedIn)
             {
                 summary.NotLoggedIn = true;
@@ -666,6 +667,9 @@ public sealed class FetchSummary
 
     /// <summary>真实余额（quota 单位；0 = 未取到）。</summary>
     public long Balance { get; set; }
+
+    /// <summary>站点账号名（登录成功时有值——总览站点块据此显示「已登录（账号）」）。</summary>
+    public string Username { get; set; } = "";
 
     /// <summary>站点口径快照（null = 未取到）。</summary>
     public SiteSnapshot? Snapshot { get; set; }
