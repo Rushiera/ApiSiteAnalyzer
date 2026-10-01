@@ -29,6 +29,14 @@ public sealed class MergedRow
 
     /// <summary>缓存 token 合计。</summary>
     public long CacheTokens { get; set; }
+    /// <summary>三种 token 之和（输入 + 输出 + 缓存）——图表的排序与显示口径。</summary>
+    public long Token
+    {
+        get
+        {
+            return PromptTokens + CompletionTokens + CacheTokens;
+        }
+    }
 }
 
 /// <summary>总览里的一个站点块——该站的关键数据（真实余额 / 本地汇总 / 上次拉取）。</summary>
@@ -125,19 +133,19 @@ public sealed class AllSitesResult
     /// <summary>再往前十次窗口（第 11–20 次）的平均输出速率（token/秒）。</summary>
     public double PrevAvgSpeedTps { get; set; }
 
-    /// <summary>按模型（跨站合并，按金额倒序）。</summary>
+    /// <summary>按模型（跨站合并，按 token 之和倒序）。</summary>
     public List<MergedRow> ByModel { get; set; } = new List<MergedRow>();
 
-    /// <summary>按天（跨站合并，按日期升序）。</summary>
+    /// <summary>按天（跨站合并，按日期倒序）。</summary>
     public List<MergedRow> ByDay { get; set; } = new List<MergedRow>();
 
     /// <summary>按小时（跨站合并，按小时升序）。</summary>
     public List<MergedRow> ByHour { get; set; } = new List<MergedRow>();
 
-    /// <summary>按令牌（跨站合并，按金额倒序）。</summary>
+    /// <summary>按令牌（跨站合并，按 token 之和倒序）。</summary>
     public List<MergedRow> ByToken { get; set; } = new List<MergedRow>();
 
-    /// <summary>按分组（跨站合并，按金额倒序）。</summary>
+    /// <summary>按分组（跨站合并，按 token 之和倒序）。</summary>
     public List<MergedRow> ByGroup { get; set; } = new List<MergedRow>();
 
     /// <summary>跨站最近记录（按时刻倒序）。</summary>
@@ -209,7 +217,7 @@ public static class SiteAggregate
             result.RequestIdCount += overview.RequestIdCount;
             symbols.Add(site.CurrencySymbol);
 
-            // [段1] 分组行——各站取全量（limit=0）再合并，合并后按金额倒序截断（截断放在合并之后，避免漏掉跨站前排）
+            // [段1] 分组行——各站取全量（limit=0）再合并，合并后按 token 之和倒序截断（截断放在合并之后，避免漏掉跨站前排）
             Merge(result.ByModel, db.ByModel(site.Id, types, 0), unit);
             Merge(result.ByDay, db.ByDay(site.Id, types), unit);
             Merge(result.ByHour, db.ByHour(site.Id, types, day), unit);
@@ -255,11 +263,11 @@ public static class SiteAggregate
         result.PrevAvgUseTime = Average(prevWindow.Where(r => r.UseTime > 0).Select(r => (double)r.UseTime));
         result.PrevAvgSpeedTps = Average(prevWindow.Where(r => r.SpeedTps > 0).Select(r => r.SpeedTps));
 
-        // [段4] 分组行排序与截断——时间轴按名称升序，其余按金额倒序
+        // [段4] 分组行排序与截断——按天新日期在上，按小时固定 00–23 升序，其余按 token 之和倒序
         result.ByModel = Top(result.ByModel, ModelLimit);
         result.ByToken = Top(result.ByToken, NameLimit);
         result.ByGroup = Top(result.ByGroup, NameLimit);
-        result.ByDay = result.ByDay.OrderBy(r => r.Name, StringComparer.Ordinal).ToList();
+        result.ByDay = result.ByDay.OrderByDescending(r => r.Name, StringComparer.Ordinal).ToList();
         result.ByHour = result.ByHour.OrderBy(r => r.Name, StringComparer.Ordinal).ToList();
 
         // [段5] 货币符号——各站一致才标；混币种留空（金额是各站折算后相加，标单一符号会误导）
@@ -336,13 +344,13 @@ public static class SiteAggregate
         return string.CompareOrdinal(left.LogKey, right.LogKey);
     }
 
-    /// <summary>按金额倒序取前 N 条。</summary>
+    /// <summary>按 token 之和（输入 + 输出 + 缓存）倒序取前 N 条。</summary>
     /// <param name="rows">合并后的行。</param>
     /// <param name="limit">保留条数。</param>
     /// <returns>截断后的行。</returns>
     private static List<MergedRow> Top(List<MergedRow> rows, int limit)
     {
-        return rows.OrderByDescending(r => r.Amount).Take(limit).ToList();
+        return rows.OrderByDescending(r => r.Token).Take(limit).ToList();
     }
 
     /// <summary>求平均（空序列返回 0——与 SQL 侧 COALESCE(AVG(...),0) 口径一致）。</summary>

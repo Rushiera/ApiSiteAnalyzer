@@ -90,6 +90,8 @@ public sealed class AggregateRow
 
     /// <summary>缓存 token 合计。</summary>
     public long CacheTokens { get; set; }
+    /// <summary>三种 token 之和（输入 + 输出 + 缓存）——图表的排序与显示口径。</summary>
+    public long Token { get; set; }
 }
 
 /// <summary>总览统计。</summary>
@@ -629,7 +631,7 @@ ON CONFLICT (site_id) DO UPDATE SET fetched_at=excluded.fetched_at, total_count=
     /// <param name="siteId">站点键。</param>
     /// <param name="types">记录类型白名单。</param>
     /// <param name="limit">返回条数上限。</param>
-    /// <returns>聚合行（按额度倒序）。</returns>
+    /// <returns>聚合行（按 token 之和倒序）。</returns>
     public List<AggregateRow> ByModel(string siteId, IReadOnlyList<int> types, int limit)
     {
         return GroupBy(siteId, "model_name", types, limit);
@@ -639,7 +641,7 @@ ON CONFLICT (site_id) DO UPDATE SET fetched_at=excluded.fetched_at, total_count=
     /// <param name="siteId">站点键。</param>
     /// <param name="types">记录类型白名单。</param>
     /// <param name="limit">返回条数上限。</param>
-    /// <returns>聚合行（按额度倒序）。</returns>
+    /// <returns>聚合行（按 token 之和倒序）。</returns>
     public List<AggregateRow> ByToken(string siteId, IReadOnlyList<int> types, int limit)
     {
         return GroupBy(siteId, "token_name", types, limit);
@@ -648,7 +650,7 @@ ON CONFLICT (site_id) DO UPDATE SET fetched_at=excluded.fetched_at, total_count=
     /// <summary>按天聚合（本地时区）。**空档补齐**——从最早记录日逐日铺到「今天 / 最晚记录日」，无记录日给 0 行；跨度超过窗口（31 天）时只铺最近这么多天。</summary>
     /// <param name="siteId">站点键。</param>
     /// <param name="types">记录类型白名单。</param>
-    /// <returns>聚合行（按日期升序，Name = yyyy-MM-dd）。</returns>
+    /// <returns>聚合行（按日期倒序，Name = yyyy-MM-dd）。</returns>
     public List<AggregateRow> ByDay(string siteId, IReadOnlyList<int> types)
     {
         List<AggregateRow> rows = GroupByExpr(siteId, "strftime('%Y-%m-%d', created_at, 'unixepoch', 'localtime')", types, 0, true);
@@ -695,6 +697,8 @@ ON CONFLICT (site_id) DO UPDATE SET fetched_at=excluded.fetched_at, total_count=
             }
         }
 
+        // [段3] 顺序反转——铺补按日期升序生成，面板列表要新日期在上
+        filled.Reverse();
         return filled;
     }
 
@@ -743,7 +747,7 @@ ON CONFLICT (site_id) DO UPDATE SET fetched_at=excluded.fetched_at, total_count=
     /// <param name="siteId">站点键。</param>
     /// <param name="types">记录类型白名单。</param>
     /// <param name="limit">返回条数上限。</param>
-    /// <returns>聚合行（按额度倒序）。</returns>
+    /// <returns>聚合行（按 token 之和倒序）。</returns>
     public List<AggregateRow> ByGroup(string siteId, IReadOnlyList<int> types, int limit)
     {
         return GroupBy(siteId, "group_name", types, limit);
@@ -878,14 +882,14 @@ ON CONFLICT (site_id) DO UPDATE SET fetched_at=excluded.fetched_at, total_count=
     /// <param name="expression">分组表达式（SQL 片段）。</param>
     /// <param name="types">记录类型白名单。</param>
     /// <param name="limit">返回条数上限（0 = 不限）。</param>
-    /// <param name="ascending">true = 按分组名升序，false = 按额度倒序。</param>
+    /// <param name="ascending">true = 按分组名升序，false = 按 token 之和倒序。</param>
     /// <param name="whereDay">限定日期（yyyy-MM-dd，本地时区；空 = 不限定）。</param>
     private List<AggregateRow> GroupByExpr(string siteId, string expression, IReadOnlyList<int> types, int limit, bool ascending, string whereDay = "")
     {
         var rows = new List<AggregateRow>();
 
         using var cmd = _conn.CreateCommand();
-        string order = ascending ? "ORDER BY 1 ASC" : "ORDER BY 3 DESC";
+        string order = ascending ? "ORDER BY 1 ASC" : "ORDER BY 7 DESC";
         string tail = limit > 0 ? " LIMIT " + limit : "";
         string filter = BuildTypeFilter(cmd, types);
         if (whereDay.Length > 0)
@@ -895,7 +899,8 @@ ON CONFLICT (site_id) DO UPDATE SET fetched_at=excluded.fetched_at, total_count=
         }
 
         cmd.CommandText = "SELECT " + expression + " AS k, COUNT(*), COALESCE(SUM(quota),0), " +
-            "COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), COALESCE(SUM(cache_tokens),0) " +
+            "COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), COALESCE(SUM(cache_tokens),0), " +
+            "COALESCE(SUM(prompt_tokens),0) + COALESCE(SUM(completion_tokens),0) + COALESCE(SUM(cache_tokens),0) " +
             "FROM usage_log WHERE site_id=$site" + filter + " GROUP BY k " + order + tail + ";";
         cmd.Parameters.AddWithValue("$site", siteId);
 
@@ -910,6 +915,7 @@ ON CONFLICT (site_id) DO UPDATE SET fetched_at=excluded.fetched_at, total_count=
                 PromptTokens = reader.GetInt64(3),
                 CompletionTokens = reader.GetInt64(4),
                 CacheTokens = reader.GetInt64(5),
+                Token = reader.GetInt64(6),
             });
         }
 

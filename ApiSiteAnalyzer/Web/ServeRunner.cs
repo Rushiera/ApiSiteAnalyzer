@@ -860,7 +860,7 @@ public static class ServeRunner
     /// <returns>前端结构。</returns>
     private static object Map(AggregateRow row, double unit)
     {
-        return MapRow(row.Name, row.Count, row.Quota, row.Quota / unit, row.PromptTokens, row.CompletionTokens, row.CacheTokens);
+        return MapRow(row.Name, row.Count, row.Quota, row.Quota / unit, row.PromptTokens, row.CompletionTokens, row.CacheTokens, row.Token);
     }
 
     /// <summary>把跨站合并行映射成前端结构（金额已在合并时按各站换算比折算）。</summary>
@@ -868,19 +868,20 @@ public static class ServeRunner
     /// <returns>前端结构。</returns>
     private static object MapMerged(MergedRow row)
     {
-        return MapRow(row.Name, row.Count, row.Quota, row.Amount, row.PromptTokens, row.CompletionTokens, row.CacheTokens);
+        return MapRow(row.Name, row.Count, row.Quota, row.Amount, row.PromptTokens, row.CompletionTokens, row.CacheTokens, row.Token);
     }
 
     /// <summary>聚合行的前端结构（单站与总览共用同一份形状——两处各写一份必漂移）。</summary>
     /// <param name="name">分组名。</param>
-    /// <param name="count">条数。</param>
+    /// <param name="count">条数（= 请求数）。</param>
     /// <param name="quota">原始额度。</param>
     /// <param name="amount">折算金额。</param>
     /// <param name="promptTokens">输入 token。</param>
     /// <param name="completionTokens">输出 token。</param>
     /// <param name="cacheTokens">缓存 token。</param>
+    /// <param name="token">三种 token 之和（输入 + 输出 + 缓存）——图表的排序与显示口径。</param>
     /// <returns>前端结构。</returns>
-    private static object MapRow(string name, long count, long quota, double amount, long promptTokens, long completionTokens, long cacheTokens)
+    private static object MapRow(string name, long count, long quota, double amount, long promptTokens, long completionTokens, long cacheTokens, long token)
     {
         return new
         {
@@ -891,6 +892,7 @@ public static class ServeRunner
             promptTokens = promptTokens,
             completionTokens = completionTokens,
             cacheTokens = cacheTokens,
+            token = token,
         };
     }
 
