@@ -48,7 +48,7 @@ public sealed class UsageRow
     /// <summary>命中缓存的输入 token 数（0 = 未提供）。</summary>
     public long CacheTokens { get; set; }
 
-    /// <summary>耗时（秒）。</summary>
+    /// <summary>耗时（**秒**——站点 `use_time` 字段的原始单位，Go 侧为 int；面板显示时 ×1000 折算成毫秒，故精度上限为 1 秒）。</summary>
     public long UseTime { get; set; }
 
     /// <summary>首字延迟（毫秒，0 = 未提供）。</summary>

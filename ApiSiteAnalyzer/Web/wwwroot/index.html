@@ -63,7 +63,12 @@
   .scroll{max-height:460px;overflow:auto}
   .muted{color:var(--dim)}
   .tag{display:inline-block;padding:1px 6px;border-radius:4px;background:#1e2632;color:var(--dim);font-size:11px}
+  /* 请求 ID 列——站点 request_id 较长，超宽省略号收口，完整值走 title */
+  .reqid{display:inline-block;max-width:190px;overflow:hidden;text-overflow:ellipsis;vertical-align:bottom;
+    font-family:Consolas,"Courier New",monospace;font-size:12px;color:var(--dim)}
   .auto-on{color:var(--accent)}
+  /* 输入列下方小字：A（命中缓存 B）——A = 输入 − 缓存（未命中部分） */
+  .cacheline{font-size:11px;color:var(--gold);font-weight:400;line-height:1.35}
 
   /* 设置弹窗（双击「拉取数据」打开） */
   .mask{position:fixed;inset:0;background:rgba(6,8,12,.66);display:none;align-items:center;justify-content:center;z-index:50}
@@ -177,7 +182,7 @@
           <th>时间</th><th>类型</th><th>模型</th><th>令牌</th>
           <th class="num">额度</th><th class="num">金额</th>
           <th class="num">输入</th><th class="num">输出</th><th class="num">缓存</th>
-          <th class="num">t/s</th><th class="num">首字(ms)</th><th class="num">耗时(s)</th><th>流式</th>
+          <th class="num">t/s</th><th class="num">首字(ms)</th><th class="num">耗时(ms)</th><th>请求 ID</th>
         </tr></thead>
         <tbody></tbody>
       </table>
@@ -193,12 +198,15 @@ let timer = null;
 let siteMap = {};
 function fmtNum(n){ return (n===null||n===undefined)?'—':Number(n).toLocaleString('zh-CN'); }
 function fmtAmount(v, sym){ return (v===null||v===undefined)?'—':sym + Number(v).toFixed(4); }
+/* 余额段专用——精确到小数点后 8 位（其余金额列仍用 4 位，避免整页噪声） */
+function fmtAmount8(v, sym){ return (v===null||v===undefined)?'—':sym + Number(v).toFixed(8); }
 function fmtTokens(n){
   if(n===null||n===undefined) return '—';
   if(n >= 1e8) return (n/1e8).toFixed(1) + '亿';
   if(n >= 1e4) return (n/1e4).toFixed(1) + '万';
   return Number(n).toLocaleString('zh-CN');
 }
+function fmtMs(sec){ if(!sec) return '—'; return fmtNum(Math.round(Number(sec)*1000)); }
 function fmtTime(sec){ if(!sec) return '—'; const d=new Date(sec*1000); const p=n=>String(n).padStart(2,'0');
   return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds()); }
 function esc(s){ return String(s===null||s===undefined?'':s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
@@ -263,7 +271,7 @@ function renderBalance(balance){
   if(!s){ $('balanceMain').textContent = '—'; return; }
   if(!balance && balance !== 0){ $('balanceMain').textContent = '—'; $('balanceSide').textContent = '点「检查登录」取真实余额'; return; }
   const sym = s.currencySymbol;
-  $('balanceMain').textContent = fmtAmount(balance / s.quotaPerUnit, sym);
+  $('balanceMain').textContent = fmtAmount8(balance / s.quotaPerUnit, sym);
   $('balanceSide').innerHTML = '原始 <b>' + fmtNum(balance) + '</b> quota · 换算 <b>1 ' + esc(sym) + ' = ' + fmtNum(s.quotaPerUnit) + ' quota</b>';
 }
 
@@ -282,21 +290,30 @@ function renderBars(container, rows, sym, opts){
 }
 
 function renderCards(o, sym){
+  const n = o.recentSampleCount || 0;
+  const win = n >= 10 ? '近十次' : ('近 ' + n + ' 次');
   const items = [
     ['本地记录数', fmtNum(o.count)],
     ['本地消费金额', fmtAmount(o.amount, sym)],
-    ['本地额度', fmtNum(o.quota)],
+    ['已探明请求 ID', fmtNum(o.requestIdCount)],
     ['输入 Token', fmtNum(o.promptTokens)],
     ['输出 Token', fmtNum(o.completionTokens)],
     ['缓存 Token', fmtNum(o.cacheTokens)],
     ['缓存命中率', (o.cacheHitRate*100).toFixed(1) + '%'],
-    ['平均首字', Math.round(o.avgFirstTokenMs) + ' ms'],
-    ['平均耗时', o.avgUseTime.toFixed(2) + ' s'],
-    ['平均速率', o.avgSpeedTps.toFixed(1) + ' t/s'],
-    ['时间跨度', fmtTime(o.minCreatedAt) + ' → ' + fmtTime(o.maxCreatedAt)],
+    [win + '平均首字', Math.round(o.recentAvgFirstTokenMs) + ' ms'],
+    [win + '平均耗时', fmtNum(Math.round(o.recentAvgUseTime*1000)) + ' ms'],
+    [win + '平均速率', o.recentAvgSpeedTps.toFixed(1) + ' t/s'],
   ];
   $('cards').innerHTML = items.map(it =>
     '<div class="card"><div class="k">'+esc(it[0])+'</div><div class="v">'+esc(it[1])+'</div></div>').join('');
+}
+
+/* 输入列下方小黄字：A（命中缓存 B）——A = 输入 − 缓存（未命中部分），B = 缓存 token */
+function cacheLine(r){
+  const p = r.promptTokens || 0;
+  if(p <= 0) return '';
+  const c = r.cacheTokens || 0;
+  return '<div class="cacheline">' + fmtNum(p - c) + '（命中缓存 ' + fmtNum(c) + '）</div>';
 }
 
 function renderRecent(rows, sym){
@@ -310,13 +327,13 @@ function renderRecent(rows, sym){
     '<td>'+esc(r.tokenName || '—')+'</td>' +
     '<td class="num">'+fmtNum(r.quota)+'</td>' +
     '<td class="num">'+fmtAmount(r.amount, sym)+'</td>' +
-    '<td class="num">'+fmtNum(r.promptTokens)+'</td>' +
+    '<td class="num">'+fmtNum(r.promptTokens)+cacheLine(r)+'</td>' +
     '<td class="num">'+fmtNum(r.completionTokens)+'</td>' +
     '<td class="num">'+fmtNum(r.cacheTokens)+'</td>' +
     '<td class="num">'+(r.speedTps > 0 ? r.speedTps.toFixed(0) : '—')+'</td>' +
     '<td class="num">'+(r.firstTokenMs > 0 ? r.firstTokenMs : '—')+'</td>' +
-    '<td class="num">'+(r.useTime||'—')+'</td>' +
-    '<td>'+(r.isStream ? '是' : '否')+'</td>' +
+    '<td class="num">'+fmtMs(r.useTime)+'</td>' +
+    '<td><span class="reqid" title="'+esc(r.requestId)+'">'+esc(r.requestId || '—')+'</span></td>' +
     '</tr>').join('');
 }
 

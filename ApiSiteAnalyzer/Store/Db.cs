@@ -109,20 +109,20 @@ public sealed class OverviewStat
     /// <summary>缓存 token 合计。</summary>
     public long CacheTokens { get; set; }
 
-    /// <summary>平均首字延迟（毫秒）。</summary>
-    public double AvgFirstTokenMs { get; set; }
+    /// <summary>已探明请求 ID 数（去重计数——库内稳定主键的来源）。</summary>
+    public long RequestIdCount { get; set; }
 
-    /// <summary>平均耗时（秒）。</summary>
-    public double AvgUseTime { get; set; }
+    /// <summary>近十次请求的平均首字延迟（毫秒）。</summary>
+    public double RecentAvgFirstTokenMs { get; set; }
 
-    /// <summary>平均输出速率（token/秒）。</summary>
-    public double AvgSpeedTps { get; set; }
+    /// <summary>近十次请求的平均耗时（秒）。</summary>
+    public double RecentAvgUseTime { get; set; }
 
-    /// <summary>最早记录时刻（Unix 秒）。</summary>
-    public long MinCreatedAt { get; set; }
+    /// <summary>近十次请求的平均输出速率（token/秒）。</summary>
+    public double RecentAvgSpeedTps { get; set; }
 
-    /// <summary>最晚记录时刻（Unix 秒）。</summary>
-    public long MaxCreatedAt { get; set; }
+    /// <summary>近十次窗口内的记录条数（不足十条时即实际条数）。</summary>
+    public long RecentSampleCount { get; set; }
 }
 
 /// <summary>
@@ -461,30 +461,49 @@ ON CONFLICT (site_id) DO UPDATE SET fetched_at=excluded.fetched_at, total_count=
     {
         var stat = new OverviewStat();
 
-        using var cmd = _conn.CreateCommand();
-        cmd.CommandText = @"
-SELECT COUNT(*), COALESCE(SUM(quota),0), COALESCE(SUM(prompt_tokens),0),
-       COALESCE(SUM(completion_tokens),0), COALESCE(SUM(cache_tokens),0),
-       COALESCE(AVG(CASE WHEN first_token_ms > 0 THEN first_token_ms END), 0),
-       COALESCE(AVG(CASE WHEN use_time > 0 THEN use_time END), 0),
-       COALESCE(AVG(CASE WHEN speed_tps > 0 THEN speed_tps END), 0),
-       COALESCE(MIN(created_at),0), COALESCE(MAX(created_at),0)
-FROM usage_log WHERE site_id=$site" + BuildTypeFilter(cmd, types) + ";";
-        cmd.Parameters.AddWithValue("$site", siteId);
-
-        using SqliteDataReader reader = cmd.ExecuteReader();
-        if (reader.Read())
+        // [段1] 全量合计 + 去重请求 ID 数（请求 ID 是库内稳定主键的来源）
+        using (var cmd = _conn.CreateCommand())
         {
-            stat.Count = reader.GetInt64(0);
-            stat.Quota = reader.GetInt64(1);
-            stat.PromptTokens = reader.GetInt64(2);
-            stat.CompletionTokens = reader.GetInt64(3);
-            stat.CacheTokens = reader.GetInt64(4);
-            stat.AvgFirstTokenMs = reader.GetDouble(5);
-            stat.AvgUseTime = reader.GetDouble(6);
-            stat.AvgSpeedTps = reader.GetDouble(7);
-            stat.MinCreatedAt = reader.GetInt64(8);
-            stat.MaxCreatedAt = reader.GetInt64(9);
+            cmd.CommandText = @"
+    SELECT COUNT(*), COALESCE(SUM(quota),0), COALESCE(SUM(prompt_tokens),0),
+           COALESCE(SUM(completion_tokens),0), COALESCE(SUM(cache_tokens),0),
+           COUNT(DISTINCT CASE WHEN request_id <> '' THEN request_id END)
+    FROM usage_log WHERE site_id=$site" + BuildTypeFilter(cmd, types) + ";";
+            cmd.Parameters.AddWithValue("$site", siteId);
+
+            using SqliteDataReader reader = cmd.ExecuteReader();
+            if (reader.Read())
+            {
+                stat.Count = reader.GetInt64(0);
+                stat.Quota = reader.GetInt64(1);
+                stat.PromptTokens = reader.GetInt64(2);
+                stat.CompletionTokens = reader.GetInt64(3);
+                stat.CacheTokens = reader.GetInt64(4);
+                stat.RequestIdCount = reader.GetInt64(5);
+            }
+        }
+
+        // [段2] 近十次请求的平均——按时刻倒序取窗口，与「最近记录」表同序
+        using (var cmd = _conn.CreateCommand())
+        {
+            cmd.CommandText = @"
+    SELECT COUNT(*),
+           COALESCE(AVG(CASE WHEN first_token_ms > 0 THEN first_token_ms END), 0),
+           COALESCE(AVG(CASE WHEN use_time > 0 THEN use_time END), 0),
+           COALESCE(AVG(CASE WHEN speed_tps > 0 THEN speed_tps END), 0)
+    FROM (SELECT first_token_ms, use_time, speed_tps FROM usage_log
+          WHERE site_id=$site" + BuildTypeFilter(cmd, types) + @"
+          ORDER BY created_at DESC, remote_id DESC LIMIT 10);";
+            cmd.Parameters.AddWithValue("$site", siteId);
+
+            using SqliteDataReader reader = cmd.ExecuteReader();
+            if (reader.Read())
+            {
+                stat.RecentSampleCount = reader.GetInt64(0);
+                stat.RecentAvgFirstTokenMs = reader.GetDouble(1);
+                stat.RecentAvgUseTime = reader.GetDouble(2);
+                stat.RecentAvgSpeedTps = reader.GetDouble(3);
+            }
         }
 
         return stat;
