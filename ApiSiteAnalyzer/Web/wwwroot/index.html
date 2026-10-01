@@ -141,9 +141,13 @@
   .dialog .actions{display:flex;gap:8px;align-items:center;margin-top:18px}
   .dialog .actions .spacer{flex:1}
 
-  /* 站点表（总览视图）——一站一行：站点 / 通道 / 真实余额 / 登录态 / 下次采集 / 本地汇总 / 上次拉取 / 自动采集 */
-  .siteblocks{display:none;margin:14px 0;overflow-x:auto}
+  /* 站点表（总览视图）——一站一行：站点 / 通道 / 真实余额 / 登录态 / 下次采集 / 本地汇总 / 上次拉取 / 自动采集
+     宽度受控：长文本换行、列宽按内容收缩——任何窗口宽度下都不出现左右滑动的滚动条 */
+  .siteblocks{display:none;margin:14px 0}
   body.all-mode .siteblocks{display:block}
+  .siteblocks th,.siteblocks td{white-space:normal;overflow-wrap:anywhere}
+  /* 数字与金额列不折行（值短，折了反而难读）；余额主值同理 */
+  .siteblocks th.num,.siteblocks td.num,.siteblocks .bal{white-space:nowrap}
   /* 总览没有单站余额与单站口径——那两行只在单站视图显示 */
   body.all-mode .balance{display:none}
   body.all-mode .official{display:none}
@@ -153,8 +157,8 @@
   .siteblocks .sub{color:var(--dim);font-size:11px;margin-top:2px}
   /* 站点格：名称 + 通道标签同格 */
   .siteblocks .name{font-weight:600;margin-right:6px}
-  /* 自动采集格：说明较长——允许换行，不把整表撑宽 */
-  .siteblocks td.auto{white-space:normal;min-width:170px;max-width:260px}
+  /* 自动采集格：说明较长——换行 + 封顶宽度，不把整表撑宽 */
+  .siteblocks td.auto{max-width:260px}
   /* 站点列——只在总览视图显示（单站视图里整列冗余） */
   .colsite{display:none}
   body.all-mode .colsite{display:table-cell}
