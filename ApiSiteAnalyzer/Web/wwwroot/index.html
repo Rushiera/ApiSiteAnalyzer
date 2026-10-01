@@ -69,6 +69,8 @@
   .bar .track{background:#1c222b;border-radius:4px;height:14px;overflow:hidden}
   .bar .fill{height:100%;background:linear-gradient(90deg,#2f6fd0,#4f9cf9);border-radius:4px}
   .bar .val{text-align:right;font-variant-numeric:tabular-nums}
+  /* 空档补齐行——库里这一天 / 这一小时没有记录，淡出呈现（不画填充条） */
+  .bar.empty{opacity:.45}
   .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
   @media (max-width:900px){.grid2{grid-template-columns:1fr}}
   .scroll{max-height:460px;overflow:auto}
@@ -462,9 +464,11 @@ function renderBars(container, rows, sym, opts){
   if(!rows || !rows.length){ el.innerHTML = '<div class="muted">暂无数据</div>'; return; }
   const max = Math.max.apply(null, rows.map(r => r.quota || 0)) || 1;
   el.innerHTML = rows.map(r => {
-    const w = Math.max(1, Math.round((r.quota||0) / max * 100));
+    /* 空档补齐行（count = 0——库里这一天没有记录）不画条、整行淡出，与「有记录但金额为 0」区分 */
+    const empty = !r.count;
+    const w = empty ? 0 : Math.max(1, Math.round((r.quota||0) / max * 100));
     const label = opts.label ? opts.label(r) : r.name;
-    return '<div class="bar"><div class="name" title="'+esc(r.name)+'">'+esc(label)+'</div>' +
+    return '<div class="bar' + (empty ? ' empty' : '') + '"><div class="name" title="'+esc(r.name)+'">'+esc(label)+'</div>' +
       '<div class="track"><div class="fill" style="width:'+w+'%"></div></div>' +
       '<div class="val">'+fmtAmount(r.amount, sym)+' <span class="muted">/ '+fmtNum(r.count)+'</span></div></div>';
   }).join('');
@@ -484,9 +488,9 @@ function renderCards(o, sym){
     ['输出 Token', fmtNum(o.completionTokens)],
     ['缓存 Token', fmtNum(o.cacheTokens)],
     ['缓存命中率', (o.cacheHitRate*100).toFixed(1) + '%'],
-    [win + '平均首字', Math.round(o.recentAvgFirstTokenMs) + ' ms', null, deltaLine(o.recentAvgFirstTokenMs, o.prevAvgFirstTokenMs, pc, true)],
-    [win + '平均耗时', fmtNum(Math.round(o.recentAvgUseTime*1000)) + ' ms', null, deltaLine(o.recentAvgUseTime, o.prevAvgUseTime, pc, true)],
-    [win + '平均速率', o.recentAvgSpeedTps.toFixed(1) + ' t/s', null, deltaLine(o.recentAvgSpeedTps, o.prevAvgSpeedTps, pc, false)],
+    [win + '平均首字', Math.round(o.recentAvgFirstTokenMs) + ' ms', null, deltaLine(o.recentAvgFirstTokenMs, o.prevAvgFirstTokenMs, pc, true, Math.round(o.prevAvgFirstTokenMs) + ' ms')],
+    [win + '平均耗时', fmtNum(Math.round(o.recentAvgUseTime*1000)) + ' ms', null, deltaLine(o.recentAvgUseTime, o.prevAvgUseTime, pc, true, fmtNum(Math.round(o.prevAvgUseTime*1000)) + ' ms')],
+    [win + '平均速率', o.recentAvgSpeedTps.toFixed(1) + ' t/s', null, deltaLine(o.recentAvgSpeedTps, o.prevAvgSpeedTps, pc, false, o.prevAvgSpeedTps.toFixed(1) + ' t/s')],
   ];
   $('cards').innerHTML = items.map(it =>
     '<div class="card' + (it[2] ? ' clickable' : '') + '"' + (it[2] ? ' data-key="' + it[2] + '"' : '') +
@@ -501,18 +505,18 @@ function cacheLine(r){
   return '<div class="cacheline">' + fmtNum(p - c) + '（命中缓存 ' + fmtNum(c) + '）</div>';
 }
 
-/* 卡片对比行（近十次 vs 再往前十次）：右侧百分比——首字 / 耗时越小越好，速率越大越好；
-   样本不足或均值不可比时如实说明（不静默省略，也不假报百分比） */
-function deltaLine(cur, prev, prevCount, lowerBetter){
-  if(prevCount < 1) return '<div class="deltaline">较前 10 次 样本不足</div>';
-  if(!(prev > 0) || !(cur > 0)) return '<div class="deltaline">较前 10 次 无有效样本</div>';
+/* 卡片对比行（近十次 vs 再往前十次）：左「前 10 次 + 具体数值」、右百分比——
+   首字 / 耗时越小越好，速率越大越好；样本不足或均值不可比时如实说明（不静默省略，也不假报百分比） */
+function deltaLine(cur, prev, prevCount, lowerBetter, prevText){
+  if(prevCount < 1) return '<div class="deltaline">前 10 次 样本不足</div>';
+  if(!(prev > 0) || !(cur > 0)) return '<div class="deltaline">前 10 次 无有效样本</div>';
   const pct = Math.round((cur - prev) / prev * 1000) / 10;
   let cls = '';
   if(pct !== 0){
     const better = lowerBetter ? pct < 0 : pct > 0;
     cls = better ? ' good' : ' bad';
   }
-  return '<div class="deltaline' + cls + '"><span>较前 10 次</span><span>' + (pct > 0 ? '+' : '') + pct.toFixed(1) + '%</span></div>';
+  return '<div class="deltaline' + cls + '"><span>前 10 次 ' + prevText + '</span><span>' + (pct > 0 ? '+' : '') + pct.toFixed(1) + '%</span></div>';
 }
 
 function renderRecent(rows, sym){
