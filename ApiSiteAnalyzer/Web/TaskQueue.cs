@@ -89,16 +89,11 @@ public sealed class PanelState
     /// <summary>进度文本。</summary>
     private string _message = "";
 
-    /// <summary>自动采集是否开启（面板顶部状态显示用）。</summary>
+    /// <summary>自动采集是否开启（全局开关；面板顶部状态显示用）。</summary>
     private bool _autoEnabled;
 
-    /// <summary>自动采集间隔（秒）。</summary>
-    private int _autoIntervalSeconds;
-    /// <summary>连续空采轮数（0 = 未降级）——面板顶部据此标出「降级中」。</summary>
-    private int _autoEmptyRounds;
-
-    /// <summary>下一次自动采集时刻（yyyy-MM-dd HH:mm:ss；空 = 未排）。</summary>
-    private string _autoNextAt = "";
+    /// <summary>各站点自动采集运行态（键 = 站点键）——各站独立计时与降级，互不影响。</summary>
+    private readonly Dictionary<string, AutoState> _autoStates = new Dictionary<string, AutoState>(StringComparer.Ordinal);
 
     /// <summary>构造。</summary>
     /// <param name="sites">站点清单（保留）。</param>
@@ -201,19 +196,32 @@ public sealed class PanelState
         }
     }
 
-    /// <summary>记下自动采集状态（面板顶部一眼可见「开没开、间隔多少、降级没有、下次什么时候」）。</summary>
+    /// <summary>记下自动采集总开关（各站共用一个开关；间隔与降级各站独立）。</summary>
     /// <param name="enabled">是否开启。</param>
-    /// <param name="intervalSeconds">当前生效间隔（秒——降级后是翻倍值，不是基准值）。</param>
-    /// <param name="emptyRounds">连续空采轮数（> 0 即降级中）。</param>
-    /// <param name="nextAt">下一次到点时刻。</param>
-    public void SetAuto(bool enabled, int intervalSeconds, int emptyRounds, DateTime nextAt)
+    public void SetAutoEnabled(bool enabled)
     {
         lock (_gate)
         {
             _autoEnabled = enabled;
-            _autoIntervalSeconds = intervalSeconds;
-            _autoEmptyRounds = emptyRounds;
-            _autoNextAt = enabled ? nextAt.ToString("yyyy-MM-dd HH:mm:ss") : "";
+        }
+    }
+
+    /// <summary>记下一个站点的自动采集状态（面板顶部与站点块据此显示间隔 / 降级 / 异常 / 停采）。</summary>
+    /// <param name="siteId">站点键。</param>
+    /// <param name="state">该站运行态快照（内部复制一份——调用方随后改动不影响已公布的值）。</param>
+    public void SetAuto(string siteId, AutoState state)
+    {
+        lock (_gate)
+        {
+            _autoStates[siteId] = new AutoState
+            {
+                IntervalSeconds = state.IntervalSeconds,
+                EmptyRounds = state.EmptyRounds,
+                FailStreak = state.FailStreak,
+                Stopped = state.Stopped,
+                Error = state.Error,
+                NextAt = _autoEnabled ? state.NextAt : "",
+            };
         }
     }
 
@@ -235,6 +243,7 @@ public sealed class PanelState
         {
             var balances = new Dictionary<string, long>(_balances, StringComparer.Ordinal);
             long current = balances.TryGetValue(_siteId, out long value) ? value : 0;
+            var autoSites = new Dictionary<string, AutoState>(_autoStates, StringComparer.Ordinal);
             return new
             {
                 ok = true,
@@ -246,10 +255,33 @@ public sealed class PanelState
                 balance = current,
                 balances = balances,
                 autoEnabled = _autoEnabled,
-                autoIntervalSeconds = _autoIntervalSeconds,
-                autoDegraded = _autoEmptyRounds > 0,
-                autoNextAt = _autoNextAt,
+                autoSites = autoSites,
             };
         }
     }
+}
+
+/// <summary>
+/// 一个站点的自动采集运行态——各站独立计时与降级，互不影响。
+/// 只作对外快照（面板显示用）：降级计数与停采标志都在内存，不落盘。
+/// </summary>
+public sealed class AutoState
+{
+    /// <summary>当前生效间隔（秒——降级后是翻倍值，不是基准值）。</summary>
+    public int IntervalSeconds { get; set; }
+
+    /// <summary>连续空采轮数（含失败轮；0 = 未降级）。</summary>
+    public int EmptyRounds { get; set; }
+
+    /// <summary>连续失败次数（成功即清零）。</summary>
+    public int FailStreak { get; set; }
+
+    /// <summary>是否已停采（连续失败达上限）。</summary>
+    public bool Stopped { get; set; }
+
+    /// <summary>最近一次失败原因（空 = 正常）。</summary>
+    public string Error { get; set; } = "";
+
+    /// <summary>下一次到点时刻（yyyy-MM-dd HH:mm:ss；空 = 未排）。</summary>
+    public string NextAt { get; set; } = "";
 }

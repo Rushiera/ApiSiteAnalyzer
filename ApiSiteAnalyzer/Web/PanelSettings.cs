@@ -13,7 +13,7 @@ namespace ApiSiteAnalyzer.Web;
 public sealed class PanelSettings
 {
     /// <summary>间隔下限（秒）。</summary>
-    public const int MinIntervalSeconds = 5;
+    public const int MinIntervalSeconds = 3;
 
     /// <summary>间隔上限（秒）。</summary>
     public const int MaxIntervalSeconds = 119;
@@ -43,7 +43,7 @@ public sealed class PanelSettings
     /// <summary>是否开启自动采集（默认开）。</summary>
     public bool AutoEnabled { get; set; } = true;
 
-    /// <summary>自动采集间隔（秒，5–119）。</summary>
+    /// <summary>自动采集间隔（秒，3–119）——这是**基准**间隔；连续空采时下次间隔按倍数翻倍（上限 30 分钟）。</summary>
     public int AutoIntervalSeconds { get; set; } = DefaultIntervalSeconds;
 
     /// <summary>拉取是否走增量（追平即停；默认开）。</summary>

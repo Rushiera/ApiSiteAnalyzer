@@ -78,6 +78,9 @@
   .reqid{display:inline-block;max-width:190px;overflow:hidden;text-overflow:ellipsis;vertical-align:bottom;
     font-family:Consolas,"Courier New",monospace;font-size:12px;color:var(--dim)}
   .auto-on{color:var(--accent)}
+  .auto-warn{color:var(--gold)}
+  .auto-bad{color:#ff8a8a}
+  .tag.bad{background:#3a1f24;color:#ff8a8a}
   /* 输入列下方小字：A（命中缓存 B）——A = 输入 − 缓存（未命中部分） */
   .cacheline{font-size:11px;color:var(--gold);font-weight:400;line-height:1.35}
   /* 可点卡片——点开逐条明细弹窗 */
@@ -158,7 +161,7 @@
     <div class="dialog">
       <h3>采集设置</h3>
       <div class="hint">双击「拉取数据」打开；设置存 <code>data/settings.json</code>，重启面板后仍生效。</div>
-      <div class="hint">自动采集若连续没采到新记录，间隔逐轮翻倍（上限 30 分钟）；一旦采到新记录，立即回到这里设置的间隔。</div>
+      <div class="hint">自动采集按站点独立进行（各站间隔互不影响）：连续没采到新记录或采集失败，该站间隔逐轮翻倍（上限 30 分钟）；一旦采到新记录立即回到基准；连续 3 次失败则该站停采。</div>
       <div class="row">
         <input type="checkbox" id="optAuto" checked />
         <label for="optAuto">自动采集（按下方间隔定时拉取）</label>
@@ -525,7 +528,7 @@ async function loadAnalysis(){
   renderBars('byGroup', r.byGroup, sym);
   renderRecent(r.recent, sym);
   /* 总览才有站点块——逐站关键数据（真实余额 / 本地汇总 / 上次拉取） */
-  if(r.sites) renderSiteBlocks(r.sites);
+  if(r.sites){ lastSites = r.sites; renderSiteBlocks(r.sites); }
 }
 
 /* 站点块（总览视图）——每站一块：
@@ -546,15 +549,32 @@ function renderSiteBlocks(sites){
       bal = '<div class="bal muted">未探测</div>';
       sub = '选该站点后点「检查登录」取真实余额';
     }
+    /* 自动采集状态——异常 / 停采在站点块上直接标出；块内数字始终是本地库已有的数据 */
+    const a = autoSites[s.id];
+    let autoText = '—', autoFlag = '';
+    if(a){
+      if(a.stopped){
+        autoText = '已停（连续 ' + a.failStreak + ' 次失败：' + (a.error || '原因未知') + '）';
+        autoFlag = '<span class="tag bad">异常</span>';
+      }else if(a.error){
+        autoText = '异常：' + a.error;
+        autoFlag = '<span class="tag bad">异常</span>';
+      }else if(a.emptyRounds > 0){
+        autoText = '降级中 ×' + a.emptyRounds + '（间隔 ' + a.intervalSeconds + 's）';
+      }else{
+        autoText = '正常（间隔 ' + a.intervalSeconds + 's）';
+      }
+    }
     const facts = [
       ['本地记录', fmtNum(s.count) + ' 条'],
       ['本地消费', fmtAmount(s.amount, s.currencySymbol)],
       ['库内行数', fmtNum(s.rows)],
       ['上次拉取', s.lastFetchAt || '—'],
+      ['自动采集', autoText],
     ];
     return '<div class="siteblock">' +
       '<div class="head"><span class="name">' + esc(s.displayName) + '</span>' +
-      '<span class="tag">' + (s.channel === 'apikey' ? 'API key 直连' : '浏览器') + '</span></div>' +
+      '<span class="tag">' + (s.channel === 'apikey' ? 'API key 直连' : '浏览器') + '</span>' + autoFlag + '</div>' +
       bal + '<div class="sub">' + esc(sub) + '</div>' +
       '<div class="facts">' + facts.map(f =>
         '<div><span class="k">' + esc(f[0]) + '</span> <span class="v">' + esc(f[1]) + '</span></div>').join('') +
@@ -611,6 +631,9 @@ async function startFetch(full){
   poll();
 }
 
+/* 各站自动采集状态（/api/progress 每 3 秒刷新）与最近一次站点块数据——站点块据此标「异常」 */
+let autoSites = {}, lastSites = null;
+
 /* ---------- 采集设置（双击「拉取数据」打开） ---------- */
 /* 计时归服务端（AutoCollector）——页面只负责显示与改设置：
    若计时挂在页面上，关掉页面就悄悄不跑了（「设置说开着、实际没跑」= 静默失败） */
@@ -625,7 +648,7 @@ function renderSettings(){
   $('optIncremental').checked = settings.incremental;
 }
 
-/* 顶部自动采集指示——下一次到点时刻由服务端给（页面刷新也能看到同一个时刻） */
+/* 顶部自动采集指示——逐站状态由服务端给（各站独立计时，页面刷新也能看到同一个时刻） */
 function renderAutoState(p){
   const el = $('autoState');
   if(!p.autoEnabled){
@@ -633,18 +656,50 @@ function renderAutoState(p){
     el.textContent = '自动采集关';
     return;
   }
-  el.className = 'muted auto-on';
-  el.textContent = '自动采集 ' + p.autoIntervalSeconds + 's' + (p.autoDegraded ? '（降级中）' : '') + (p.autoNextAt ? '（下次 ' + p.autoNextAt.substring(11, 19) + '）' : '');
+  const states = p.autoSites || {};
+  const keys = Object.keys(states);
+  /* 单站视图：显示该站的间隔 / 降级 / 停采 / 下次时刻 */
+  if(!isAll() && states[currentSite]){
+    const s = states[currentSite];
+    if(s.stopped){
+      el.className = 'muted auto-bad';
+      el.textContent = '自动采集已停（连续 ' + s.failStreak + ' 次失败：' + (s.error || '原因未知') + '）';
+      return;
+    }
+    if(s.emptyRounds > 0){
+      el.className = 'muted auto-warn';
+      el.textContent = '自动采集 ' + s.intervalSeconds + 's（降级 ×' + s.emptyRounds + '）' + (s.nextAt ? '（下次 ' + s.nextAt.substring(11, 19) + '）' : '');
+      return;
+    }
+    el.className = 'muted auto-on';
+    el.textContent = '自动采集 ' + s.intervalSeconds + 's' + (s.nextAt ? '（下次 ' + s.nextAt.substring(11, 19) + '）' : '');
+    return;
+  }
+  /* 总览视图：给出各站汇总（降级 / 停采站数 + 最近的下次时刻） */
+  const list = keys.map(k => states[k]);
+  let next = '';
+  list.forEach(s => { if(s.nextAt && (!next || s.nextAt < next)){ next = s.nextAt; } });
+  const degraded = list.filter(s => !s.stopped && s.emptyRounds > 0).length;
+  const stopped = list.filter(s => s.stopped).length;
+  let text = '自动采集 ' + list.length + ' 站';
+  if(degraded){ text += '（降级 ' + degraded + '）'; }
+  if(stopped){ text += '（异常停采 ' + stopped + '）'; }
+  if(next){ text += '（下次 ' + next.substring(11, 19) + '）'; }
+  el.className = stopped ? 'muted auto-bad' : (degraded ? 'muted auto-warn' : 'muted auto-on');
+  el.textContent = text;
 }
 
 async function refreshAutoState(){
   const p = await fetch('/api/progress').then(x=>x.json());
+  autoSites = p.autoSites || {};
   renderAutoState(p);
   /* 服务端按站点缓存了各站余额——切回本站时不必重新探测（页面每 3 秒对一次） */
   if(p.balances){
     balances = p.balances;
     if(!isAll() && balances[currentSite] > 0){ renderBalance(balances[currentSite]); }
   }
+  /* 站点块上的自动采集状态跟着刷新（总览视图） */
+  if(isAll() && lastSites){ renderSiteBlocks(lastSites); }
 }
 
 async function loadSettings(){

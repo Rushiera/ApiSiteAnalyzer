@@ -21,6 +21,8 @@ public sealed class AutoCollector
     private const int BusyRetrySeconds = 5;
     /// <summary>降级上限（秒）——连续空采时下次间隔逐轮翻倍，最长不超过 30 分钟。</summary>
     private const int MaxBackoffSeconds = 1800;
+    /// <summary>连续失败上限——达到即停该站的自动采集（连续失败多为登录态失效，继续重试没有意义）。</summary>
+    private const int MaxFailStreak = 3;
 
     /// <summary>站点会话。</summary>
     private readonly SiteSession _session;
@@ -37,13 +39,8 @@ public sealed class AutoCollector
     /// <summary>面板设置。</summary>
     private readonly PanelSettings _settings;
 
-    /// <summary>下一次到点时刻（本地时间）。</summary>
-    private DateTime _nextRunAt = DateTime.MinValue;
-    /// <summary>
-    /// 连续「没采到新东西」的轮数——决定下次间隔翻几倍（每轮翻一倍，上限 30 分钟）。
-    /// **只在内存**（不落盘）：`settings.json` 里存的始终是基准间隔，重启回到基准。
-    /// </summary>
-    private int _emptyRounds;
+    /// <summary>各站点的计时器（按站点清单顺序）——各站独立计时与降级，互不影响。</summary>
+    private readonly List<AutoSiteTimer> _timers = new List<AutoSiteTimer>();
 
     /// <summary>构造自动采集器。</summary>
     /// <param name="session">站点会话。</param>
@@ -58,18 +55,33 @@ public sealed class AutoCollector
         _dbPath = dbPath;
         _state = state;
         _settings = settings;
+
+        // [段1] 每个站点一个计时器——各站独立计时与降级，互不影响
+        foreach (IApiSite site in sites)
+        {
+            _timers.Add(new AutoSiteTimer { Site = site });
+        }
     }
 
-    /// <summary>重排下一次到点时刻（设置改动后调用——从此刻起重新计时）。</summary>
+    /// <summary>全部站点重排下一次到点时刻并清空降级 / 失败计数（设置改动后调用——从此刻起重新开始）。</summary>
     public void Reset()
     {
-        _emptyRounds = 0;
-        _nextRunAt = DateTime.Now.AddSeconds(_settings.AutoIntervalSeconds);
+        foreach (AutoSiteTimer timer in _timers)
+        {
+            timer.EmptyRounds = 0;
+            timer.FailStreak = 0;
+            timer.Stopped = false;
+            timer.Error = "";
+            timer.NextRunAt = DateTime.Now.AddSeconds(_settings.AutoIntervalSeconds);
+        }
+
+        Publish();
     }
 
     /// <summary>
-    /// 主循环——每秒对一次表：开关关着就把到点时刻往后推（打开后从那一刻重新计时）；
-    /// 开着且到点且当前没有采集在跑，就跑一轮（增量口径跟随设置）。
+    /// 主循环——每秒对一次表：开关关着就把各站的到点时刻往后推（打开后从那一刻重新计时）；
+    /// 开着则逐站检查——某站到点、未停采、且当前没有采集在跑，就跑该站一轮（增量口径跟随设置）。
+    /// 各站独立计时与降级，互不影响。
     /// </summary>
     /// <param name="ct">取消令牌（面板停机即退出）。</param>
     /// <returns>异步任务。</returns>
@@ -77,9 +89,9 @@ public sealed class AutoCollector
     {
         Reset();
 
-        // [段1] 立刻对外公布一次自动采集状态——否则面板首屏（早于第一次 tick）会显示默认的「关」，
+        // [段1] 立刻对外公布一次状态——否则面板首屏（早于第一次 tick）会显示默认的「关」，
         //        用户看到的是「设置开着、顶部说关着」，持续约一秒的误导
-        _state.SetAuto(_settings.AutoEnabled, EffectiveIntervalSeconds(), _emptyRounds, _nextRunAt);
+        Publish();
 
         while (!ct.IsCancellationRequested)
         {
@@ -92,43 +104,51 @@ public sealed class AutoCollector
                 return;
             }
 
-            _state.SetAuto(_settings.AutoEnabled, EffectiveIntervalSeconds(), _emptyRounds, _nextRunAt);
+            Publish();
 
             if (!_settings.AutoEnabled)
             {
-                // [段2] 关着——到点时刻始终保持在「此刻 + 间隔」之外，重新打开后从那一刻起算
-                _nextRunAt = DateTime.Now.AddSeconds(EffectiveIntervalSeconds());
+                // [段2] 关着——各站到点时刻始终保持在「此刻 + 间隔」之外，重新打开后从那一刻起算
+                foreach (AutoSiteTimer timer in _timers)
+                {
+                    timer.NextRunAt = DateTime.Now.AddSeconds(EffectiveSeconds(timer));
+                }
+
                 continue;
             }
 
-            if (DateTime.Now < _nextRunAt)
+            // [段3] 逐站对表——各站到点独立、间隔独立，一站降级不影响别站；
+            //        采集动作本身仍串行（状态只有一个槽位，避免同一浏览器会话被并发驱动）
+            foreach (AutoSiteTimer timer in _timers)
             {
-                continue;
-            }
+                if (timer.Stopped)
+                {
+                    continue;
+                }
 
-            // [段3] 上一轮还没跑完（手动拉取 / 自动上一轮）——不排队、不打断，稍后再看
-            if (_state.Running)
-            {
-                _nextRunAt = DateTime.Now.AddSeconds(BusyRetrySeconds);
-                continue;
-            }
+                if (DateTime.Now < timer.NextRunAt)
+                {
+                    continue;
+                }
 
-            // [段4] 跑一轮——回执决定降级计数，下一次到点时刻按新计数重排
-            await RunOnceAsync().ConfigureAwait(false);
-            _nextRunAt = DateTime.Now.AddSeconds(EffectiveIntervalSeconds());
+                if (_state.Running)
+                {
+                    timer.NextRunAt = DateTime.Now.AddSeconds(BusyRetrySeconds);
+                    continue;
+                }
+
+                await RunOnceAsync(timer).ConfigureAwait(false);
+                timer.NextRunAt = DateTime.Now.AddSeconds(EffectiveSeconds(timer));
+            }
         }
     }
 
-    /// <summary>跑一轮自动采集（失败出声——状态条上看得见）。</summary>
+    /// <summary>跑一个站点的一轮自动采集（失败出声——状态条与总览站点块上看得见）。</summary>
+    /// <param name="timer">站点计时器（该站独立状态）。</param>
     /// <returns>异步任务。</returns>
-    private async Task RunOnceAsync()
+    private async Task RunOnceAsync(AutoSiteTimer timer)
     {
-        if (_sites.Count == 0)
-        {
-            return;
-        }
-
-        IApiSite site = _sites[0];
+        IApiSite site = timer.Site;
         if (!_state.TryBegin(site.Id, site.DisplayName + "（自动）"))
         {
             return;
@@ -143,36 +163,44 @@ public sealed class AutoCollector
             FetchSummary summary = await ServeRunner.FetchSiteAsync(_session, site, _dbPath, _state, _settings.Incremental).ConfigureAwait(false);
             Console.WriteLine("[" + DateTime.Now.ToString("HH:mm:ss") + "] 自动采集结束：" + _state.LastMessage());
 
-            // [段5] 频率降级——成功但本轮没采到新东西 → 计数 +1（下次间隔翻倍）；采到新东西 → 清零（回基准）。
-            //        失败不改变计数：失败路径不得改变状态，且失败后应尽快重试（用户可能刚登录完在等）
-            if (summary.Ok)
+            // [段1] 采到新数据 → 回基准；没采到新数据 → 下次间隔翻倍；失败 → 同样按「没采到」翻倍，并计失败数
+            if (!summary.Ok)
             {
-                if (summary.Added == 0)
-                {
-                    _emptyRounds++;
-                    Console.WriteLine("[" + DateTime.Now.ToString("HH:mm:ss") + "] 本轮无新增（连续 " + _emptyRounds +
-                        " 轮）——下次间隔 " + EffectiveIntervalSeconds() + " 秒");
-                }
-                else
-                {
-                    _emptyRounds = 0;
-                }
+                MarkFailure(timer, summary.NotLoggedIn ? "未登录" : summary.Error);
+            }
+            else if (summary.Added == 0)
+            {
+                timer.EmptyRounds++;
+                timer.FailStreak = 0;
+                timer.Error = "";
+                Console.WriteLine("[" + DateTime.Now.ToString("HH:mm:ss") + "] " + site.DisplayName +
+                    " 本轮无新增（连续 " + timer.EmptyRounds + " 轮）——下次间隔 " + EffectiveSeconds(timer) + " 秒");
+            }
+            else
+            {
+                timer.EmptyRounds = 0;
+                timer.FailStreak = 0;
+                timer.Error = "";
             }
         }
         catch (Exception ex)
         {
             _state.Fail("自动采集失败：" + ex.Message);
+            MarkFailure(timer, ex.Message);
         }
+
+        Publish();
     }
     /// <summary>
-    /// 本轮生效的采集间隔（秒）——基准间隔按「连续空采轮数」逐轮翻倍，上限 30 分钟。
+    /// 某站本轮生效的采集间隔（秒）——基准间隔按「连续空采轮数」逐轮翻倍，上限 30 分钟。
     /// 降级属运行态：计数只在内存，不落盘（`settings.json` 里始终是基准间隔）。
     /// </summary>
+    /// <param name="timer">站点计时器。</param>
     /// <returns>生效间隔（秒）。</returns>
-    private int EffectiveIntervalSeconds()
+    private int EffectiveSeconds(AutoSiteTimer timer)
     {
         int seconds = _settings.AutoIntervalSeconds;
-        for (int i = 0; i < _emptyRounds; i++)
+        for (int i = 0; i < timer.EmptyRounds; i++)
         {
             if (seconds >= MaxBackoffSeconds)
             {
@@ -189,4 +217,70 @@ public sealed class AutoCollector
 
         return seconds;
     }
+    /// <summary>把各站的运行态公布给面板（顶部状态条与总览站点块都读它）。</summary>
+    private void Publish()
+    {
+        _state.SetAutoEnabled(_settings.AutoEnabled);
+
+        foreach (AutoSiteTimer timer in _timers)
+        {
+            _state.SetAuto(timer.Site.Id, new AutoState
+            {
+                IntervalSeconds = EffectiveSeconds(timer),
+                EmptyRounds = timer.EmptyRounds,
+                FailStreak = timer.FailStreak,
+                Stopped = timer.Stopped,
+                Error = timer.Error,
+                NextAt = timer.Stopped ? "" : timer.NextRunAt.ToString("yyyy-MM-dd HH:mm:ss"),
+            });
+        }
+    }
+    /// <summary>
+    /// 记一次采集失败——失败同样「没采到数据」：降级计数 +1（下次间隔翻倍），连续失败达上限即停该站。
+    /// 停采只停自动采集，不动库内数据——面板继续用本地历史已有的数据展示。
+    /// </summary>
+    /// <param name="timer">站点计时器。</param>
+    /// <param name="reason">失败原因。</param>
+    private void MarkFailure(AutoSiteTimer timer, string reason)
+    {
+        timer.EmptyRounds++;
+        timer.FailStreak++;
+        timer.Error = reason;
+
+        if (timer.FailStreak >= MaxFailStreak)
+        {
+            timer.Stopped = true;
+            Console.WriteLine("[" + DateTime.Now.ToString("HH:mm:ss") + "] " + timer.Site.DisplayName +
+                " 连续 " + MaxFailStreak + " 次采集失败——该站自动采集已停（" + reason + "）");
+            return;
+        }
+
+        Console.WriteLine("[" + DateTime.Now.ToString("HH:mm:ss") + "] " + timer.Site.DisplayName +
+            " 采集失败：" + reason + "（连续 " + timer.FailStreak + " 次）——下次间隔 " + EffectiveSeconds(timer) + " 秒");
+    }
+}
+
+/// <summary>
+/// 一个站点的自动采集计时与运行态——各站独立计时、独立降级，互不影响。
+/// 全部在内存（不落盘）：重启回到基准间隔、失败计数清零。
+/// </summary>
+internal sealed class AutoSiteTimer
+{
+    /// <summary>站点适配器。</summary>
+    public IApiSite Site { get; set; } = null!;
+
+    /// <summary>下一次到点时刻（本地时间）。</summary>
+    public DateTime NextRunAt { get; set; } = DateTime.MinValue;
+
+    /// <summary>连续空采轮数（含失败轮）——决定下次间隔翻几倍。</summary>
+    public int EmptyRounds { get; set; }
+
+    /// <summary>连续失败次数（成功即清零）。</summary>
+    public int FailStreak { get; set; }
+
+    /// <summary>是否已停采（连续失败达上限）。</summary>
+    public bool Stopped { get; set; }
+
+    /// <summary>最近一次失败原因（空 = 正常）。</summary>
+    public string Error { get; set; } = "";
 }
