@@ -19,7 +19,7 @@ ApiSiteAnalyzer/                主项目
 config.json                     站点清单 + 端口 + chrome 路径
 data/                           运行时生成：usage.db · browsers.json · profiles/<站点>/
 启动.bat                        启动器：停旧面板 → 起最新槽位
-ApiSiteAnalyzer_A.exe           槽位 A（部署产物，不进版本控制前先看「更新」一节）
+ApiSiteAnalyzer_A.exe           槽位 A（部署产物，随仓走）
 ApiSiteAnalyzer_B.exe           槽位 B
 ```
 
