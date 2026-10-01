@@ -71,13 +71,14 @@ public static class ServeRunner
                 SiteSnapshot? snapshot = db.ReadSnapshot(site.Id);
 
                 // [段2a] 通道自证——有 key 即走 API key 直连（特批站点）；key 明文回传供面板顶部编辑
-                string apiKey = site is NewApiSite direct ? direct.ApiKey : "";
+                //        通道判定收敛在 SiteAggregate（总览站点块用同一份实现，不双写）
+                string apiKey = SiteAggregate.ApiKeyOf(site);
                 list.Add(new
                 {
                     id = site.Id,
                     displayName = site.DisplayName,
                     baseUrl = site.BaseUrl,
-                    channel = apiKey.Length > 0 ? "apikey" : "browser",
+                    channel = SiteAggregate.ChannelOf(site),
                     apiKey = apiKey,
                     loginUrl = site.LoginUrl,
                     profileDir = site.ProfileDir,
@@ -171,6 +172,7 @@ public static class ServeRunner
             try
             {
                 LoginState login = await queue.RunAsync(() => session.ProbeLoginAsync(site, CancellationToken.None)).ConfigureAwait(false);
+                state.SetBalance(site.Id, login.Quota);
                 return Results.Json(new
                 {
                     ok = true,
@@ -275,7 +277,7 @@ public static class ServeRunner
             }
 
             bool incremental = full != "true" && settings.Incremental;
-            if (!state.TryBegin(site.DisplayName))
+            if (!state.TryBegin(site.Id, site.DisplayName))
             {
                 return Results.Json(new { ok = false, error = "已有采集在进行中" });
             }
@@ -302,16 +304,10 @@ public static class ServeRunner
         // [段6] 进度
         app.MapGet("/api/progress", () => Results.Json(state.Snapshot()));
 
-        // [段7] 分析面
+        // [段7] 分析面——site=__all 为总览（跨站合并），否则为单站
         app.MapGet("/api/analysis", (HttpContext context) =>
         {
             string siteId = context.Request.Query["site"].ToString();
-            IApiSite? site = FindSite(sites, siteId);
-            if (site is null)
-            {
-                return Results.Json(new { ok = false, error = "未知站点：" + siteId });
-            }
-
             string range = context.Request.Query["range"].ToString();
             if (range.Length == 0)
             {
@@ -324,6 +320,18 @@ public static class ServeRunner
                 "consume" => new[] { 2 },
                 _ => new[] { 2 },
             };
+
+            // [段7a] 总览——合并全部站点的记录；不是真实站点，故在站点查找之前分流
+            if (IsAllSites(siteId))
+            {
+                return Results.Json(BuildAllSitesAnalysis(dbPath, sites, types, state));
+            }
+
+            IApiSite? site = FindSite(sites, siteId);
+            if (site is null)
+            {
+                return Results.Json(new { ok = false, error = "未知站点：" + siteId });
+            }
 
             using var db = new Db(dbPath);
             OverviewStat overview = db.Overview(site.Id, types);
@@ -360,39 +368,14 @@ public static class ServeRunner
                 byHour = byHour.Select(r => Map(r, unit)),
                 byToken = byToken.Select(r => Map(r, unit)),
                 byGroup = byGroup.Select(r => Map(r, unit)),
-                recent = recent.Select(r => new
-                {
-                    id = r.RemoteId,
-                    createdAt = r.CreatedAt,
-                    type = r.Type,
-                    modelName = r.ModelName,
-                    tokenName = r.TokenName,
-                    groupName = r.GroupName,
-                    quota = r.Quota,
-                    amount = r.Quota / unit,
-                    promptTokens = r.PromptTokens,
-                    completionTokens = r.CompletionTokens,
-                    cacheTokens = r.CacheTokens,
-                    useTime = r.UseTime,
-                    firstTokenMs = r.FirstTokenMs,
-                    speedTps = r.SpeedTps,
-                    isStream = r.IsStream,
-                    requestId = r.RequestId,
-                    upstreamModel = r.UpstreamModel,
-                    content = r.Content,
-                }),
+                recent = recent.Select(r => MapRecent(r, site.DisplayName, unit)),
             });
         });
 
-        // [段7b] 已探明请求 ID 明细——卡片点开的逐条清单（去重后按时刻倒序分页）
+        // [段7b] 已探明请求 ID 明细——卡片点开的逐条清单（去重后按时刻倒序分页）；site=__all 为跨站合并
         app.MapGet("/api/request-ids", (HttpContext context) =>
         {
             string siteId = context.Request.Query["site"].ToString();
-            IApiSite? site = FindSite(sites, siteId);
-            if (site is null)
-            {
-                return Results.Json(new { ok = false, error = "未知站点：" + siteId });
-            }
 
             string range = context.Request.Query["range"].ToString();
             if (range.Length == 0)
@@ -422,6 +405,42 @@ public static class ServeRunner
                 return Results.Json(new { ok = false, error = "limit 非法（1-500）：" + limitRaw });
             }
 
+            // [段2] 总览——各站先各取前 offset+limit 条，合并排序后切片
+            //        （跨站第 N 条必在各站前 N 条之内，故不漏；各站请求 ID 独立，total 按站相加）
+            if (IsAllSites(siteId))
+            {
+                using var allDb = new Db(dbPath);
+                var merged = new List<RequestIdRow>();
+                long allTotal = 0;
+                foreach (IApiSite item in sites)
+                {
+                    allTotal += allDb.RequestIdTotal(item.Id, types);
+                    merged.AddRange(allDb.RequestIds(item.Id, types, offset + limit, 0));
+                }
+
+                merged.Sort(CompareRequestId);
+                return Results.Json(new
+                {
+                    ok = true,
+                    total = allTotal,
+                    offset = offset,
+                    limit = limit,
+                    items = merged.Skip(offset).Take(limit).Select(r => new
+                    {
+                        requestId = r.RequestId,
+                        createdAt = r.CreatedAt,
+                        siteId = r.SiteId,
+                        siteName = DisplayNameOf(sites, r.SiteId),
+                    }),
+                });
+            }
+
+            IApiSite? site = FindSite(sites, siteId);
+            if (site is null)
+            {
+                return Results.Json(new { ok = false, error = "未知站点：" + siteId });
+            }
+
             using var db = new Db(dbPath);
             long total = db.RequestIdTotal(site.Id, types);
             List<RequestIdRow> items = db.RequestIds(site.Id, types, limit, offset);
@@ -432,7 +451,13 @@ public static class ServeRunner
                 total = total,
                 offset = offset,
                 limit = limit,
-                items = items.Select(r => new { requestId = r.RequestId, createdAt = r.CreatedAt }),
+                items = items.Select(r => new
+                {
+                    requestId = r.RequestId,
+                    createdAt = r.CreatedAt,
+                    siteId = r.SiteId,
+                    siteName = site.DisplayName,
+                }),
             });
         });
 
@@ -533,18 +558,194 @@ public static class ServeRunner
         return Version.TryParse(trimmed, out Version? parsed) ? parsed : null;
     }
 
-    /// <summary>把聚合行映射成前端结构。</summary>
-    private static object Map(AggregateRow row, double unit)
+    /// <summary>总览键——面板下拉第一项，代表「合并全部站点」；不是真实站点（无适配器、不可采集）。</summary>
+    public const string AllSitesKey = "__all";
+
+    /// <summary>是否总览键。</summary>
+    /// <param name="siteId">站点键（或总览键）。</param>
+    /// <returns>是总览返回 true。</returns>
+    private static bool IsAllSites(string siteId)
+    {
+        return string.Equals(siteId, AllSitesKey, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>按站点键取显示名（找不到回落键本身——不静默成空串）。</summary>
+    /// <param name="sites">站点清单。</param>
+    /// <param name="siteId">站点键。</param>
+    /// <returns>显示名。</returns>
+    private static string DisplayNameOf(List<IApiSite> sites, string siteId)
+    {
+        IApiSite? site = FindSite(sites, siteId);
+        return site is null ? siteId : site.DisplayName;
+    }
+
+    /// <summary>请求 ID 行排序——时刻倒序、请求 ID 升序（与库内分页排序同序，跨站合并后仍稳定）。</summary>
+    /// <param name="left">左。</param>
+    /// <param name="right">右。</param>
+    /// <returns>比较结果。</returns>
+    private static int CompareRequestId(RequestIdRow left, RequestIdRow right)
+    {
+        int byTime = right.CreatedAt.CompareTo(left.CreatedAt);
+        return byTime != 0 ? byTime : string.CompareOrdinal(left.RequestId, right.RequestId);
+    }
+
+    /// <summary>
+    /// 组装总览（跨站合并）响应——合并口径与取样边界见 SiteAggregate。
+    /// 金额一律按各站换算比折算（各站 quota 单位不同，直接相加无意义）。
+    /// </summary>
+    /// <param name="dbPath">库路径。</param>
+    /// <param name="sites">站点清单。</param>
+    /// <param name="types">记录类型白名单（空 = 全部）。</param>
+    /// <param name="state">面板运行态（取各站最近一次探到的真实余额）。</param>
+    /// <returns>响应对象。</returns>
+    private static object BuildAllSitesAnalysis(string dbPath, List<IApiSite> sites, int[] types, PanelState state)
+    {
+        using var db = new Db(dbPath);
+        AllSitesResult all = SiteAggregate.Build(db, sites, types, state.BalanceOf);
+        var blocks = new Dictionary<string, SiteBlock>(StringComparer.Ordinal);
+        foreach (SiteBlock block in all.Sites)
+        {
+            blocks[block.Id] = block;
+        }
+
+        return new
+        {
+            ok = true,
+            site = new
+            {
+                id = AllSitesKey,
+                displayName = "总览（全部站点）",
+                currencySymbol = all.CurrencySymbol,
+                quotaPerUnit = 0,
+            },
+            overview = new
+            {
+                count = all.Count,
+                quota = 0L,
+                amount = all.Amount,
+                promptTokens = all.PromptTokens,
+                completionTokens = all.CompletionTokens,
+                cacheTokens = all.CacheTokens,
+                cacheHitRate = all.PromptTokens > 0 ? (double)all.CacheTokens / all.PromptTokens : 0,
+                requestIdCount = all.RequestIdCount,
+                recentAvgFirstTokenMs = all.RecentAvgFirstTokenMs,
+                recentAvgUseTime = all.RecentAvgUseTime,
+                recentAvgSpeedTps = all.RecentAvgSpeedTps,
+                recentSampleCount = all.RecentSampleCount,
+            },
+            byModel = all.ByModel.Select(MapMerged),
+            byDay = all.ByDay.Select(MapMerged),
+            byHour = all.ByHour.Select(MapMerged),
+            byToken = all.ByToken.Select(MapMerged),
+            byGroup = all.ByGroup.Select(MapMerged),
+            recent = all.Recent.Select(r => MapRecent(r, DisplayNameOf(sites, r.SiteId), UnitOf(blocks, r.SiteId))),
+            sites = all.Sites.Select(MapSiteBlock),
+        };
+    }
+
+    /// <summary>取站点块的换算比（找不到回落 New API 默认 500000——不静默按 0 除）。</summary>
+    /// <param name="blocks">站点块表。</param>
+    /// <param name="siteId">站点键。</param>
+    /// <returns>每货币单位 quota 数。</returns>
+    private static double UnitOf(Dictionary<string, SiteBlock> blocks, string siteId)
+    {
+        return blocks.TryGetValue(siteId, out SiteBlock? block) && block.QuotaPerUnit > 0 ? block.QuotaPerUnit : 500000;
+    }
+
+    /// <summary>把站点块映射成前端结构（总览视图的站点块区）。</summary>
+    /// <param name="block">站点块。</param>
+    /// <returns>前端结构。</returns>
+    private static object MapSiteBlock(SiteBlock block)
     {
         return new
         {
-            name = row.Name,
-            count = row.Count,
-            quota = row.Quota,
-            amount = row.Quota / unit,
-            promptTokens = row.PromptTokens,
-            completionTokens = row.CompletionTokens,
-            cacheTokens = row.CacheTokens,
+            id = block.Id,
+            displayName = block.DisplayName,
+            channel = block.Channel,
+            rows = block.Rows,
+            count = block.Count,
+            amount = block.Amount,
+            promptTokens = block.PromptTokens,
+            completionTokens = block.CompletionTokens,
+            cacheTokens = block.CacheTokens,
+            cacheHitRate = block.CacheHitRate,
+            balance = block.Balance,
+            unlimitedBalance = block.UnlimitedBalance,
+            quotaPerUnit = block.QuotaPerUnit,
+            currencySymbol = block.CurrencySymbol,
+            lastFetchAt = block.LastFetchAt,
+        };
+    }
+
+    /// <summary>把聚合行映射成前端结构（单站口径——额度按本站换算比折算）。</summary>
+    /// <param name="row">聚合行。</param>
+    /// <param name="unit">每货币单位 quota 数。</param>
+    /// <returns>前端结构。</returns>
+    private static object Map(AggregateRow row, double unit)
+    {
+        return MapRow(row.Name, row.Count, row.Quota, row.Quota / unit, row.PromptTokens, row.CompletionTokens, row.CacheTokens);
+    }
+
+    /// <summary>把跨站合并行映射成前端结构（金额已在合并时按各站换算比折算）。</summary>
+    /// <param name="row">合并行。</param>
+    /// <returns>前端结构。</returns>
+    private static object MapMerged(MergedRow row)
+    {
+        return MapRow(row.Name, row.Count, row.Quota, row.Amount, row.PromptTokens, row.CompletionTokens, row.CacheTokens);
+    }
+
+    /// <summary>聚合行的前端结构（单站与总览共用同一份形状——两处各写一份必漂移）。</summary>
+    /// <param name="name">分组名。</param>
+    /// <param name="count">条数。</param>
+    /// <param name="quota">原始额度。</param>
+    /// <param name="amount">折算金额。</param>
+    /// <param name="promptTokens">输入 token。</param>
+    /// <param name="completionTokens">输出 token。</param>
+    /// <param name="cacheTokens">缓存 token。</param>
+    /// <returns>前端结构。</returns>
+    private static object MapRow(string name, long count, long quota, double amount, long promptTokens, long completionTokens, long cacheTokens)
+    {
+        return new
+        {
+            name = name,
+            count = count,
+            quota = quota,
+            amount = amount,
+            promptTokens = promptTokens,
+            completionTokens = completionTokens,
+            cacheTokens = cacheTokens,
+        };
+    }
+
+    /// <summary>把一条库行映射成前端结构（金额按该行所属站点折算——总览里每行单位可能不同）。</summary>
+    /// <param name="record">库行。</param>
+    /// <param name="siteName">所属站点显示名。</param>
+    /// <param name="unit">所属站点每货币单位 quota 数。</param>
+    /// <returns>前端结构。</returns>
+    private static object MapRecent(UsageRecord record, string siteName, double unit)
+    {
+        return new
+        {
+            id = record.RemoteId,
+            siteId = record.SiteId,
+            siteName = siteName,
+            createdAt = record.CreatedAt,
+            type = record.Type,
+            modelName = record.ModelName,
+            tokenName = record.TokenName,
+            groupName = record.GroupName,
+            quota = record.Quota,
+            amount = record.Quota / unit,
+            promptTokens = record.PromptTokens,
+            completionTokens = record.CompletionTokens,
+            cacheTokens = record.CacheTokens,
+            useTime = record.UseTime,
+            firstTokenMs = record.FirstTokenMs,
+            speedTps = record.SpeedTps,
+            isStream = record.IsStream,
+            requestId = record.RequestId,
+            upstreamModel = record.UpstreamModel,
+            content = record.Content,
         };
     }
 
@@ -554,7 +755,8 @@ public static class ServeRunner
     /// <param name="dbPath">库路径。</param>
     /// <param name="state">面板运行态。</param>
     /// <param name="incremental">是否增量（追平历史即停）。</param>
-    public static async Task FetchSiteAsync(SiteSession session, IApiSite site, string dbPath, PanelState state, bool incremental)
+    /// <returns>拉取汇总（含新增条数——自动采集据此决定是否降级间隔）。</returns>
+    public static async Task<FetchSummary> FetchSiteAsync(SiteSession session, IApiSite site, string dbPath, PanelState state, bool incremental)
     {
         using var db = new Db(dbPath);
 
@@ -577,12 +779,12 @@ public static class ServeRunner
                 state.Fail(summary.Error);
             }
 
-            return;
+            return summary;
         }
 
         long rows = db.Count(site.Id);
         db.MarkFetched(site.Id, rows);
-        state.SetBalance(summary.Balance);
+        state.SetBalance(site.Id, summary.Balance);
 
         if (summary.Snapshot is not null)
         {
@@ -591,6 +793,7 @@ public static class ServeRunner
 
         state.Done("完成：拉取 " + summary.Pages + " 页 / " + summary.Fetched + " 条 · 新增 " + summary.Added +
             " 条 · 库内 " + rows + " 行" + (summary.StoppedEarly ? " · 已追平历史（提前停止）" : ""));
+        return summary;
     }
 
     /// <summary>请求体字段缓存键（HttpContext.Items）。</summary>

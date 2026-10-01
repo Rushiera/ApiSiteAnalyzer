@@ -133,6 +133,8 @@ public sealed class RequestIdRow
 
     /// <summary>该请求的时刻（unix 秒）。</summary>
     public long CreatedAt { get; set; }
+    /// <summary>所属站点键（跨站明细要标出来源）。</summary>
+    public string SiteId { get; set; } = "";
 }
 
 /// <summary>
@@ -563,6 +565,7 @@ ON CONFLICT (site_id) DO UPDATE SET fetched_at=excluded.fetched_at, total_count=
             {
                 RequestId = reader.GetString(0),
                 CreatedAt = reader.GetInt64(1),
+                SiteId = siteId,
             });
         }
 

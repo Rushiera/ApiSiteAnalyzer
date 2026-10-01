@@ -19,6 +19,8 @@ public sealed class AutoCollector
 
     /// <summary>上一轮采集仍在跑时的复查间隔（秒）。</summary>
     private const int BusyRetrySeconds = 5;
+    /// <summary>降级上限（秒）——连续空采时下次间隔逐轮翻倍，最长不超过 30 分钟。</summary>
+    private const int MaxBackoffSeconds = 1800;
 
     /// <summary>站点会话。</summary>
     private readonly SiteSession _session;
@@ -37,6 +39,11 @@ public sealed class AutoCollector
 
     /// <summary>下一次到点时刻（本地时间）。</summary>
     private DateTime _nextRunAt = DateTime.MinValue;
+    /// <summary>
+    /// 连续「没采到新东西」的轮数——决定下次间隔翻几倍（每轮翻一倍，上限 30 分钟）。
+    /// **只在内存**（不落盘）：`settings.json` 里存的始终是基准间隔，重启回到基准。
+    /// </summary>
+    private int _emptyRounds;
 
     /// <summary>构造自动采集器。</summary>
     /// <param name="session">站点会话。</param>
@@ -56,6 +63,7 @@ public sealed class AutoCollector
     /// <summary>重排下一次到点时刻（设置改动后调用——从此刻起重新计时）。</summary>
     public void Reset()
     {
+        _emptyRounds = 0;
         _nextRunAt = DateTime.Now.AddSeconds(_settings.AutoIntervalSeconds);
     }
 
@@ -71,7 +79,7 @@ public sealed class AutoCollector
 
         // [段1] 立刻对外公布一次自动采集状态——否则面板首屏（早于第一次 tick）会显示默认的「关」，
         //        用户看到的是「设置开着、顶部说关着」，持续约一秒的误导
-        _state.SetAuto(_settings.AutoEnabled, _settings.AutoIntervalSeconds, _nextRunAt);
+        _state.SetAuto(_settings.AutoEnabled, EffectiveIntervalSeconds(), _emptyRounds, _nextRunAt);
 
         while (!ct.IsCancellationRequested)
         {
@@ -84,12 +92,12 @@ public sealed class AutoCollector
                 return;
             }
 
-            _state.SetAuto(_settings.AutoEnabled, _settings.AutoIntervalSeconds, _nextRunAt);
+            _state.SetAuto(_settings.AutoEnabled, EffectiveIntervalSeconds(), _emptyRounds, _nextRunAt);
 
             if (!_settings.AutoEnabled)
             {
                 // [段2] 关着——到点时刻始终保持在「此刻 + 间隔」之外，重新打开后从那一刻起算
-                _nextRunAt = DateTime.Now.AddSeconds(_settings.AutoIntervalSeconds);
+                _nextRunAt = DateTime.Now.AddSeconds(EffectiveIntervalSeconds());
                 continue;
             }
 
@@ -105,8 +113,9 @@ public sealed class AutoCollector
                 continue;
             }
 
-            _nextRunAt = DateTime.Now.AddSeconds(_settings.AutoIntervalSeconds);
+            // [段4] 跑一轮——回执决定降级计数，下一次到点时刻按新计数重排
             await RunOnceAsync().ConfigureAwait(false);
+            _nextRunAt = DateTime.Now.AddSeconds(EffectiveIntervalSeconds());
         }
     }
 
@@ -120,23 +129,64 @@ public sealed class AutoCollector
         }
 
         IApiSite site = _sites[0];
-        if (!_state.TryBegin(site.DisplayName + "（自动）"))
+        if (!_state.TryBegin(site.Id, site.DisplayName + "（自动）"))
         {
             return;
         }
 
         Console.WriteLine("[" + DateTime.Now.ToString("HH:mm:ss") + "] 自动采集开始：" + site.DisplayName +
             (_settings.Incremental ? "（增量）" : "（全量）"));
-        _state.SetBalance(0);
+        _state.SetBalance(site.Id, 0);
 
         try
         {
-            await ServeRunner.FetchSiteAsync(_session, site, _dbPath, _state, _settings.Incremental).ConfigureAwait(false);
+            FetchSummary summary = await ServeRunner.FetchSiteAsync(_session, site, _dbPath, _state, _settings.Incremental).ConfigureAwait(false);
             Console.WriteLine("[" + DateTime.Now.ToString("HH:mm:ss") + "] 自动采集结束：" + _state.LastMessage());
+
+            // [段5] 频率降级——成功但本轮没采到新东西 → 计数 +1（下次间隔翻倍）；采到新东西 → 清零（回基准）。
+            //        失败不改变计数：失败路径不得改变状态，且失败后应尽快重试（用户可能刚登录完在等）
+            if (summary.Ok)
+            {
+                if (summary.Added == 0)
+                {
+                    _emptyRounds++;
+                    Console.WriteLine("[" + DateTime.Now.ToString("HH:mm:ss") + "] 本轮无新增（连续 " + _emptyRounds +
+                        " 轮）——下次间隔 " + EffectiveIntervalSeconds() + " 秒");
+                }
+                else
+                {
+                    _emptyRounds = 0;
+                }
+            }
         }
         catch (Exception ex)
         {
             _state.Fail("自动采集失败：" + ex.Message);
         }
+    }
+    /// <summary>
+    /// 本轮生效的采集间隔（秒）——基准间隔按「连续空采轮数」逐轮翻倍，上限 30 分钟。
+    /// 降级属运行态：计数只在内存，不落盘（`settings.json` 里始终是基准间隔）。
+    /// </summary>
+    /// <returns>生效间隔（秒）。</returns>
+    private int EffectiveIntervalSeconds()
+    {
+        int seconds = _settings.AutoIntervalSeconds;
+        for (int i = 0; i < _emptyRounds; i++)
+        {
+            if (seconds >= MaxBackoffSeconds)
+            {
+                return MaxBackoffSeconds;
+            }
+
+            seconds = seconds * 2;
+        }
+
+        if (seconds > MaxBackoffSeconds)
+        {
+            return MaxBackoffSeconds;
+        }
+
+        return seconds;
     }
 }

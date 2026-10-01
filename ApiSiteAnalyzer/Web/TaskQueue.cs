@@ -78,6 +78,10 @@ public sealed class PanelState
 
     /// <summary>当前站点显示名。</summary>
     private string _site = "";
+    /// <summary>当前站点键（余额按站点分开记，总览视图要逐站取）。</summary>
+    private string _siteId = "";
+    /// <summary>各站点最近一次探到的真实余额（quota 单位；键 = 站点键，0 = 未取到）。</summary>
+    private readonly Dictionary<string, long> _balances = new Dictionary<string, long>(StringComparer.Ordinal);
 
     /// <summary>阶段：idle / running / done / failed。</summary>
     private string _phase = "idle";
@@ -85,14 +89,13 @@ public sealed class PanelState
     /// <summary>进度文本。</summary>
     private string _message = "";
 
-    /// <summary>真实余额（quota 单位；0 = 未取到）。</summary>
-    private long _balance;
-
     /// <summary>自动采集是否开启（面板顶部状态显示用）。</summary>
     private bool _autoEnabled;
 
     /// <summary>自动采集间隔（秒）。</summary>
     private int _autoIntervalSeconds;
+    /// <summary>连续空采轮数（0 = 未降级）——面板顶部据此标出「降级中」。</summary>
+    private int _autoEmptyRounds;
 
     /// <summary>下一次自动采集时刻（yyyy-MM-dd HH:mm:ss；空 = 未排）。</summary>
     private string _autoNextAt = "";
@@ -118,25 +121,14 @@ public sealed class PanelState
         }
     }
 
-    /// <summary>开始一轮采集。</summary>
-    /// <param name="siteName">站点显示名。</param>
-    public void Begin(string siteName)
-    {
-        lock (_gate)
-        {
-            _site = siteName;
-            _phase = "running";
-            _message = "开始采集 " + siteName;
-        }
-    }
-
     /// <summary>
     /// 抢占一轮采集——「检查是否在跑」与「置为运行中」必须在同一把锁里完成。
     /// 分两步做会留竞态窗口：手动拉取与自动采集同时通过检查，双双驱动同一浏览器会话。
     /// </summary>
+    /// <param name="siteId">站点键（余额按站点分开记）。</param>
     /// <param name="siteName">站点显示名。</param>
     /// <returns>抢到返回 true；已有采集在跑返回 false。</returns>
-    public bool TryBegin(string siteName)
+    public bool TryBegin(string siteId, string siteName)
     {
         lock (_gate)
         {
@@ -145,6 +137,7 @@ public sealed class PanelState
                 return false;
             }
 
+            _siteId = siteId;
             _site = siteName;
             _phase = "running";
             _message = "开始采集 " + siteName;
@@ -187,26 +180,39 @@ public sealed class PanelState
         }
     }
 
-    /// <summary>记下真实余额。</summary>
-    /// <param name="balance">余额（quota 单位）。</param>
-    public void SetBalance(long balance)
+    /// <summary>记下某站点的真实余额（按站点分开存——总览视图要逐站显示）。</summary>
+    /// <param name="siteId">站点键。</param>
+    /// <param name="balance">余额（quota 单位；0 = 未取到）。</param>
+    public void SetBalance(string siteId, long balance)
     {
         lock (_gate)
         {
-            _balance = balance;
+            _balances[siteId] = balance;
+        }
+    }
+    /// <summary>取某站点最近一次探到的真实余额（0 = 未取到）。</summary>
+    /// <param name="siteId">站点键。</param>
+    /// <returns>余额（quota 单位）。</returns>
+    public long BalanceOf(string siteId)
+    {
+        lock (_gate)
+        {
+            return _balances.TryGetValue(siteId, out long value) ? value : 0;
         }
     }
 
-    /// <summary>记下自动采集状态（面板顶部一眼可见「开没开、下次什么时候」）。</summary>
+    /// <summary>记下自动采集状态（面板顶部一眼可见「开没开、间隔多少、降级没有、下次什么时候」）。</summary>
     /// <param name="enabled">是否开启。</param>
-    /// <param name="intervalSeconds">间隔（秒）。</param>
+    /// <param name="intervalSeconds">当前生效间隔（秒——降级后是翻倍值，不是基准值）。</param>
+    /// <param name="emptyRounds">连续空采轮数（> 0 即降级中）。</param>
     /// <param name="nextAt">下一次到点时刻。</param>
-    public void SetAuto(bool enabled, int intervalSeconds, DateTime nextAt)
+    public void SetAuto(bool enabled, int intervalSeconds, int emptyRounds, DateTime nextAt)
     {
         lock (_gate)
         {
             _autoEnabled = enabled;
             _autoIntervalSeconds = intervalSeconds;
+            _autoEmptyRounds = emptyRounds;
             _autoNextAt = enabled ? nextAt.ToString("yyyy-MM-dd HH:mm:ss") : "";
         }
     }
@@ -227,16 +233,21 @@ public sealed class PanelState
     {
         lock (_gate)
         {
+            var balances = new Dictionary<string, long>(_balances, StringComparer.Ordinal);
+            long current = balances.TryGetValue(_siteId, out long value) ? value : 0;
             return new
             {
                 ok = true,
                 phase = _phase,
                 site = _site,
+                siteId = _siteId,
                 message = _message,
                 running = _phase == "running",
-                balance = _balance,
+                balance = current,
+                balances = balances,
                 autoEnabled = _autoEnabled,
                 autoIntervalSeconds = _autoIntervalSeconds,
+                autoDegraded = _autoEmptyRounds > 0,
                 autoNextAt = _autoNextAt,
             };
         }

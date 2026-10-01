@@ -100,6 +100,26 @@
   .dialog .actions{display:flex;gap:8px;align-items:center;margin-top:18px}
   .dialog .actions .spacer{flex:1}
 
+  /* 站点块（总览视图）——每站一块：真实余额 / 本地汇总 / 上次拉取 */
+  .siteblocks{display:none;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:12px;margin:14px 0}
+  body.all-mode .siteblocks{display:grid}
+  /* 总览没有单站余额与单站口径——那两行只在单站视图显示 */
+  body.all-mode .balance{display:none}
+  body.all-mode .official{display:none}
+  .siteblock{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:13px 15px}
+  .siteblock .head{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+  .siteblock .name{font-weight:600}
+  .siteblock .bal{font-size:22px;font-weight:700;color:var(--gold);font-variant-numeric:tabular-nums;line-height:1.2;word-break:break-all}
+  .siteblock .bal.muted{color:var(--dim);font-size:15px;font-weight:600}
+  .siteblock .sub{color:var(--dim);font-size:11px;margin-top:5px}
+  .siteblock .facts{margin-top:10px;padding-top:9px;border-top:1px solid var(--line);display:grid;
+    grid-template-columns:1fr 1fr;gap:5px 10px;font-size:12px}
+  .siteblock .facts .k{color:var(--dim)}
+  .siteblock .facts .v{font-variant-numeric:tabular-nums}
+  /* 站点列——只在总览视图显示（单站视图里整列冗余） */
+  .colsite{display:none}
+  body.all-mode .colsite{display:table-cell}
+
   /* 请求 ID 明细弹窗（点「已探明请求 ID」卡片打开） */
   .dialog.wide{width:min(760px,94vw)}
   .dialog .ids{max-height:54vh;overflow:auto;border:1px solid var(--line);border-radius:8px}
@@ -138,13 +158,14 @@
     <div class="dialog">
       <h3>采集设置</h3>
       <div class="hint">双击「拉取数据」打开；设置存 <code>data/settings.json</code>，重启面板后仍生效。</div>
+      <div class="hint">自动采集若连续没采到新记录，间隔逐轮翻倍（上限 30 分钟）；一旦采到新记录，立即回到这里设置的间隔。</div>
       <div class="row">
         <input type="checkbox" id="optAuto" checked />
         <label for="optAuto">自动采集（按下方间隔定时拉取）</label>
       </div>
       <div class="row">
         <span class="k">间隔</span>
-        <input type="range" id="optInterval" min="5" max="119" step="1" value="29" />
+        <input type="range" id="optInterval" min="3" max="119" step="1" value="29" />
         <span class="val" id="optIntervalVal">29 s</span>
       </div>
       <div class="row">
@@ -166,7 +187,7 @@
       <div class="hint" id="idhint">读取中…</div>
       <div class="ids">
         <table id="idtable">
-          <thead><tr><th style="width:64px">#</th><th>请求 ID</th><th style="width:170px">时间</th></tr></thead>
+          <thead><tr><th style="width:64px">#</th><th>请求 ID</th><th style="width:170px">时间</th><th class="colsite" style="width:150px">站点</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
@@ -193,6 +214,8 @@
     <div class="row" id="officialRow"></div>
     <div class="stamp" id="officialStamp"></div>
   </div>
+
+  <div class="siteblocks" id="siteBlocks"></div>
 
   <div class="cards" id="cards"></div>
 
@@ -228,7 +251,7 @@
     <div class="scroll">
       <table id="recent">
         <thead><tr>
-          <th>时间</th><th>类型</th><th>模型</th><th>令牌</th>
+          <th>时间</th><th class="colsite">站点</th><th>类型</th><th>模型</th><th>令牌</th>
           <th class="num">额度</th><th class="num">金额</th>
           <th class="num">输入</th><th class="num">输出</th><th class="num">缓存</th>
           <th class="num">t/s</th><th class="num">首字(ms)</th><th class="num">耗时(ms)</th><th>请求 ID</th>
@@ -242,9 +265,14 @@
 <script>
 const $ = (id) => document.getElementById(id);
 const TYPE_NAME = {1:'充值',2:'消费',3:'管理',4:'系统',5:'错误',6:'退款',7:'登录'};
+/* 总览键——下拉第一项，合并全部站点的记录；不是真实站点（不可探测 / 不可采集） */
+const ALL_SITE = '__all__';
 let currentSite = '';
 let timer = null;
 let siteMap = {};
+/* 各站最近一次探到的真实余额（服务端按站点分开记，页面只做显示） */
+let balances = {};
+function isAll(){ return currentSite === ALL_SITE; }
 function fmtNum(n){ return (n===null||n===undefined)?'—':Number(n).toLocaleString('zh-CN'); }
 function fmtAmount(v, sym){ return (v===null||v===undefined)?'—':sym + Number(v).toFixed(4); }
 /* 余额段专用——精确到小数点后 8 位（其余金额列仍用 4 位，避免整页噪声） */
@@ -281,6 +309,12 @@ async function loadSites(keep){
   const sel = $('site');
   sel.innerHTML = '';
   siteMap = {};
+  /* 总览置顶——合并全部站点的记录；它不是真实站点，故不可探测 / 不可采集 */
+  siteMap[ALL_SITE] = { id: ALL_SITE, displayName: '总览（全部站点）', channel: 'all', rows: 0 };
+  const allOpt = document.createElement('option');
+  allOpt.value = ALL_SITE;
+  allOpt.textContent = '总览（全部站点）';
+  sel.appendChild(allOpt);
   r.sites.forEach(s => {
     siteMap[s.id] = s;
     const o = document.createElement('option');
@@ -289,17 +323,34 @@ async function loadSites(keep){
     sel.appendChild(o);
   });
   if(keep && siteMap[keep]){ currentSite = keep; }
-  else if(r.sites.length){ currentSite = r.sites[0].id; }
+  else { currentSite = ALL_SITE; }
   sel.value = currentSite;
   sel.onchange = () => { currentSite = sel.value; switchSite(); };
+  applyMode();
   renderKeyBar();
   renderBalance(null);
   renderOfficial();
 }
 
+/* 视图模式——总览（合并全部站点，不可采集）与单站（可探测 / 采集）两套布局 */
+function applyMode(){
+  const all = isAll();
+  document.body.classList.toggle('all-mode', all);
+  $('btnCheck').disabled = all;
+  $('btnLogin').disabled = all;
+  $('btnFetch').disabled = all;
+  if(all){ $('siteBlocks').innerHTML = ''; }
+}
+
 function renderOfficial(){
   const s = siteMap[currentSite];
   const el = $('officialRow');
+  if(isAll()){
+    /* 总览没有单站口径（那套数字是站点自己的窗口聚合）——逐站关键数据在站点块里 */
+    el.innerHTML = '';
+    $('officialStamp').textContent = '';
+    return;
+  }
   if(!s || !s.snapshot){
     const direct = !!(s && s.channel === 'apikey');
     el.innerHTML = '<div class="cell"><div class="k">—</div><div class="v muted">' +
@@ -326,9 +377,12 @@ function renderOfficial(){
    面板上所有属于站点的东西一次性换到新站点；明细弹窗就地关掉（那属于上一个站）。 */
 async function switchSite(){
   closeRequestIds();
+  applyMode();
   await loadSites(currentSite);
   const s = siteMap[currentSite];
-  setStatus(s ? ('已切到「' + s.displayName + '」——点「检查登录」或「拉取数据」取数') : '未选择站点', '');
+  setStatus(isAll()
+    ? '总览：合并全部站点的记录（逐站关键数据见站点块）——采集请选具体站点'
+    : (s ? ('已切到「' + s.displayName + '」——点「检查登录」或「拉取数据」取数') : '未选择站点'), '');
   loadAnalysis();
 }
 
@@ -363,11 +417,22 @@ async function saveKey(){
 function renderBalance(balance){
   const s = siteMap[currentSite];
   if(!s){ $('balanceMain').textContent = '—'; return; }
-  /* 直连站点没有余额接口——不论传进来什么一律显示「无此接口」（切站点后不会残留上一个站的数字） */
-  if(s.channel === 'apikey'){
+  /* 总览没有单站余额——逐站余额在站点块里 */
+  if(isAll()){
     $('balanceMain').textContent = '—';
-    $('balanceSide').textContent = '该站无余额接口（API key 只能查用量日志）';
+    $('balanceSide').textContent = '总览视图——逐站余额见下方站点块';
     return;
+  }
+  /* 直连站点没有余额接口——不论传进来什么一律显示「不设限」（切站点后不会残留上一个站的数字） */
+  if(s.channel === 'apikey'){
+    $('balanceMain').textContent = '不设限';
+    $('balanceSide').textContent = '该站无余额接口（API key 只能查用量日志）——按站点口径显示「不设限」';
+    return;
+  }
+  /* 服务端按站点缓存了最近一次探到的余额——切回本站不必重新探测 */
+  if(balance === null || balance === undefined){
+    const cached = balances[currentSite];
+    if(cached > 0){ balance = cached; }
   }
   if(!balance && balance !== 0){
     $('balanceMain').textContent = '—';
@@ -423,10 +488,11 @@ function cacheLine(r){
 
 function renderRecent(rows, sym){
   const tb = $('recent').querySelector('tbody');
-  if(!rows || !rows.length){ tb.innerHTML = '<tr><td colspan="13" class="muted">暂无数据</td></tr>'; return; }
+  if(!rows || !rows.length){ tb.innerHTML = '<tr><td colspan="14" class="muted">暂无数据</td></tr>'; return; }
   tb.innerHTML = rows.map(r =>
     '<tr>' +
     '<td>'+esc(fmtTime(r.createdAt))+'</td>' +
+    '<td class="colsite">'+esc(r.siteName || '—')+'</td>' +
     '<td><span class="tag">'+esc(TYPE_NAME[r.type] || r.type)+'</span></td>' +
     '<td title="'+esc(r.upstreamModel)+'">'+esc(r.modelName || '—')+'</td>' +
     '<td>'+esc(r.tokenName || '—')+'</td>' +
@@ -458,10 +524,46 @@ async function loadAnalysis(){
   renderBars('byToken', r.byToken, sym);
   renderBars('byGroup', r.byGroup, sym);
   renderRecent(r.recent, sym);
+  /* 总览才有站点块——逐站关键数据（真实余额 / 本地汇总 / 上次拉取） */
+  if(r.sites) renderSiteBlocks(r.sites);
+}
+
+/* 站点块（总览视图）——每站一块：
+   直连通道没有余额接口的站点按「不设限」展示（不是 0、也不是取数失败）；
+   浏览器通道站点显示最近一次探到的真实余额（没探过就如实说未探测）。 */
+function renderSiteBlocks(sites){
+  const el = $('siteBlocks');
+  if(!sites || !sites.length){ el.innerHTML = '<div class="muted">未配置站点</div>'; return; }
+  el.innerHTML = sites.map(s => {
+    let bal, sub;
+    if(s.unlimitedBalance){
+      bal = '<div class="bal">不设限</div>';
+      sub = '该站无余额接口——按站点口径显示「不设限」';
+    }else if(s.balance > 0){
+      bal = '<div class="bal">' + esc(fmtAmount8(s.balance / s.quotaPerUnit, s.currencySymbol)) + '</div>';
+      sub = '原始 ' + fmtNum(s.balance) + ' quota · 1 ' + esc(s.currencySymbol) + ' = ' + fmtNum(s.quotaPerUnit) + ' quota';
+    }else{
+      bal = '<div class="bal muted">未探测</div>';
+      sub = '选该站点后点「检查登录」取真实余额';
+    }
+    const facts = [
+      ['本地记录', fmtNum(s.count) + ' 条'],
+      ['本地消费', fmtAmount(s.amount, s.currencySymbol)],
+      ['库内行数', fmtNum(s.rows)],
+      ['上次拉取', s.lastFetchAt || '—'],
+    ];
+    return '<div class="siteblock">' +
+      '<div class="head"><span class="name">' + esc(s.displayName) + '</span>' +
+      '<span class="tag">' + (s.channel === 'apikey' ? 'API key 直连' : '浏览器') + '</span></div>' +
+      bal + '<div class="sub">' + esc(sub) + '</div>' +
+      '<div class="facts">' + facts.map(f =>
+        '<div><span class="k">' + esc(f[0]) + '</span> <span class="v">' + esc(f[1]) + '</span></div>').join('') +
+      '</div></div>';
+  }).join('');
 }
 
 async function checkLogin(){
-  if(!currentSite) return;
+  if(!currentSite || isAll()) return;
   const asked = currentSite;
   setStatus('正在检查登录态…');
   const r = await fetch('/api/login-check', {
@@ -486,7 +588,7 @@ async function checkLogin(){
 }
 
 async function openLogin(){
-  if(!currentSite) return;
+  if(!currentSite || isAll()) return;
   setStatus('正在打开浏览器…');
   const r = await fetch('/api/open-login', {
     method:'POST', headers:{'Content-Type':'application/json'},
@@ -497,7 +599,7 @@ async function openLogin(){
 }
 
 async function startFetch(full){
-  if(!currentSite) return;
+  if(!currentSite || isAll()) return;
   const body = {site: currentSite};
   if(full) body.full = 'true';
   const r = await fetch('/api/fetch', {
@@ -512,7 +614,7 @@ async function startFetch(full){
 /* ---------- 采集设置（双击「拉取数据」打开） ---------- */
 /* 计时归服务端（AutoCollector）——页面只负责显示与改设置：
    若计时挂在页面上，关掉页面就悄悄不跑了（「设置说开着、实际没跑」= 静默失败） */
-let settings = { autoEnabled:true, autoIntervalSeconds:29, incremental:true, minIntervalSeconds:5, maxIntervalSeconds:119 };
+let settings = { autoEnabled:true, autoIntervalSeconds:29, incremental:true, minIntervalSeconds:3, maxIntervalSeconds:119 };
 
 function renderSettings(){
   $('optAuto').checked = settings.autoEnabled;
@@ -532,12 +634,17 @@ function renderAutoState(p){
     return;
   }
   el.className = 'muted auto-on';
-  el.textContent = '自动采集 ' + p.autoIntervalSeconds + 's' + (p.autoNextAt ? '（下次 ' + p.autoNextAt.substring(11, 19) + '）' : '');
+  el.textContent = '自动采集 ' + p.autoIntervalSeconds + 's' + (p.autoDegraded ? '（降级中）' : '') + (p.autoNextAt ? '（下次 ' + p.autoNextAt.substring(11, 19) + '）' : '');
 }
 
 async function refreshAutoState(){
   const p = await fetch('/api/progress').then(x=>x.json());
   renderAutoState(p);
+  /* 服务端按站点缓存了各站余额——切回本站时不必重新探测（页面每 3 秒对一次） */
+  if(p.balances){
+    balances = p.balances;
+    if(!isAll() && balances[currentSite] > 0){ renderBalance(balances[currentSite]); }
+  }
 }
 
 async function loadSettings(){
@@ -574,7 +681,8 @@ function appendIdRows(items){
     idShown = idShown + 1;
     return '<tr><td class="num muted">' + idShown + '</td>' +
       '<td><span class="reqid" title="'+esc(r.requestId)+'">'+esc(r.requestId)+'</span></td>' +
-      '<td>'+esc(fmtTime(r.createdAt))+'</td></tr>';
+      '<td>'+esc(fmtTime(r.createdAt))+'</td>' +
+      '<td class="colsite">'+esc(r.siteName || '—')+'</td></tr>';
   }).join('');
 }
 
@@ -645,7 +753,8 @@ $('cards').onclick = (e) => {
   await refreshAutoState();
   setInterval(refreshAutoState, 3000);
   await loadAnalysis();
-  await checkLogin();
+  /* 总览不是真实站点——没有登录态可查 */
+  if(!isAll()) await checkLogin();
 })();
 
 async function poll(){
@@ -657,8 +766,9 @@ async function poll(){
     clearInterval(timer); timer = null;
     if(r.phase === 'done'){
       setStatus(r.message, 'ok');
-      if(r.balance) renderBalance(r.balance);
-      await loadSites();
+      if(r.balances){ balances = r.balances; }
+      if(!isAll() && r.balance) renderBalance(r.balance);
+      await loadSites(currentSite);
       await loadAnalysis();
     }
     else if(r.phase === 'failed'){ setStatus('失败：' + r.message, 'bad'); }

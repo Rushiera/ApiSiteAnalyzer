@@ -16,7 +16,7 @@ ApiSiteAnalyzer/                主项目
   Collect/                      站点会话（登录探测 + 分页拉取 + 口径快照）+ 逐页落库器
   Sites/                        站点适配器（IApiSite + NewApiSite）
   Store/                        SQLite 库（幂等写入 + 增量比对 + 聚合查询）
-  Web/                          Minimal API 端点 + 自动采集器 + wwwroot/index.html
+  Web/                          Minimal API 端点 + 自动采集器 + 跨站聚合器（SiteAggregate）+ wwwroot/index.html
 config.json                     站点清单 + 端口 + chrome 路径
 data/                           运行时生成：usage.db · settings.json · browsers.json · profiles/<站点>/
 启动.bat                        启动器：停旧面板 → 起最新槽位
@@ -134,6 +134,18 @@ access_token 只活在页面里（`window.__asaToken`），从不回传程序进
 | 限流 | 短时密集请求会 429；直连一轮只发一次请求，天然避开 |
 
 CLI 同样走这条通道：`ApiSiteAnalyzer_A.exe fetch` 会为每个站点选自己的通道（浏览器 / 直连），落库口径仍是同一份 `PageWriter`。
+
+## 总览（面板第一项）
+
+站点下拉的**第一项是「总览（全部站点）」**——合并全部站点的记录，并逐站给出关键数据。
+
+| 项 | 说明 |
+|:--|:--|
+| 合并口径 | 条数 / token 直接相加；**金额按各站换算比折算后相加**（各站 `quotaPerUnit` 可能不同，原始 quota 跨站不可比） |
+| 站点块 | 每站一块——真实余额（浏览器通道站点）·「不设限」（无余额接口的直连站）·「未探测」三态；外加本地记录数 · 本地消费金额 · 库内行数 · 上次拉取时刻 |
+| 站点列 | 「最近记录」与「请求 ID 明细」在总览下多一列「站点」（单站视图里该列隐藏） |
+| 不可采集 | 总览视图下「检查登录 / 去登录 / 拉取数据」禁用——**采集永远发生在具体站点上**；总览没有适配器、不进 `config.json` |
+| 余额缓存 | 真实余额**按站点分开缓存**（探活 / 拉取时记下）——切回本站不必重新探测；总览里没探过的站点如实显示「未探测」 |
 
 ## 三类数字（别混淆）
 
