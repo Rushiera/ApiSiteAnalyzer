@@ -431,6 +431,34 @@ ON CONFLICT (site_id) DO UPDATE SET last_fetch_at=excluded.last_fetch_at, total_
         return value is null || value is DBNull ? 0 : Convert.ToInt64(value);
     }
 
+    /// <summary>
+    /// 读库内最新一条记录的提交时刻（跨站点取最大值）——「工作状态」判定的基准。
+    /// 站点日志的 `created_at` 就是请求的提交时刻（unix 秒），故它即「最近一次提交」。
+    /// </summary>
+    /// <param name="siteIds">站点键清单（空 = 无站点，返回 0）。</param>
+    /// <returns>unix 秒；库内无记录返回 0。</returns>
+    public long LatestCreatedAt(IReadOnlyList<string> siteIds)
+    {
+        if (siteIds.Count == 0)
+        {
+            return 0;
+        }
+
+        // [段1] 站点键逐一带参——不拼字符串（键来自配置，但拼接仍是坏习惯）
+        using var cmd = _conn.CreateCommand();
+        var names = new List<string>();
+        for (int i = 0; i < siteIds.Count; i++)
+        {
+            string name = "$s" + i;
+            names.Add(name);
+            cmd.Parameters.AddWithValue(name, siteIds[i]);
+        }
+
+        cmd.CommandText = "SELECT MAX(created_at) FROM usage_log WHERE site_id IN (" + string.Join(",", names) + ");";
+        object? value = cmd.ExecuteScalar();
+        return value is null || value is DBNull ? 0 : Convert.ToInt64(value);
+    }
+
     /// <summary>写站点口径快照（dashboard/models 页口径——每次实时拉取后覆盖）。</summary>
     /// <param name="siteId">站点键。</param>
     /// <param name="snapshot">快照。</param>

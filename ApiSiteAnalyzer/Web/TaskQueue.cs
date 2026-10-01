@@ -97,6 +97,8 @@ public sealed class PanelState
 
     /// <summary>各站点自动采集运行态（键 = 站点键）——各站独立计时与降级，互不影响。</summary>
     private readonly Dictionary<string, AutoState> _autoStates = new Dictionary<string, AutoState>(StringComparer.Ordinal);
+    /// <summary>工作状态快照（最近提交时刻 → 工作中 / 疑似停工 / 已停工；null = 尚未判定）。</summary>
+    private WorkSnapshot? _work;
 
     /// <summary>构造。</summary>
     /// <param name="sites">站点清单（保留）。</param>
@@ -260,6 +262,24 @@ public sealed class PanelState
             };
         }
     }
+    /// <summary>记下工作状态快照（监视器每秒公布一次——面板顶部状态条据此画进度条）。</summary>
+    /// <param name="work">工作状态快照（内部复制一份——调用方随后改动不影响已公布的值）。</param>
+    public void SetWork(WorkSnapshot work)
+    {
+        lock (_gate)
+        {
+            _work = new WorkSnapshot
+            {
+                State = work.State,
+                Label = work.Label,
+                LastSubmitAt = work.LastSubmitAt,
+                ElapsedSeconds = work.ElapsedSeconds,
+                WindowSeconds = work.WindowSeconds,
+                Checking = work.Checking,
+                Detail = work.Detail,
+            };
+        }
+    }
 
     /// <summary>取当前状态文本（自动采集日志用）。</summary>
     /// <returns>状态文本。</returns>
@@ -294,6 +314,7 @@ public sealed class PanelState
                 logins = logins,
                 autoEnabled = _autoEnabled,
                 autoSites = autoSites,
+                work = _work,
             };
         }
     }
@@ -341,4 +362,33 @@ public sealed class LoginSnapshot
 
     /// <summary>本次结论的时刻（yyyy-MM-dd HH:mm:ss）。</summary>
     public string CheckedAt { get; set; } = "";
+}
+
+/// <summary>
+/// 工作状态快照（面板顶部状态条用）——按「最近一次提交」距现在多久分档：
+/// 小于 30 秒「工作中」· 30–180 秒「疑似停工」· 满 180 秒触发一次全站反查，确认全站无新记录才「已停工」。
+/// 时刻与档位由服务端给（关掉页面照样判定），页面只负责把它画成进度条。
+/// </summary>
+public sealed class WorkSnapshot
+{
+    /// <summary>状态：none（库内无记录）/ working / suspect / stopped。</summary>
+    public string State { get; set; } = "none";
+
+    /// <summary>状态文本（无记录 / 工作中 / 疑似停工 / 已停工）。</summary>
+    public string Label { get; set; } = "";
+
+    /// <summary>最近一次提交时刻（unix 秒；0 = 库内无记录）。</summary>
+    public long LastSubmitAt { get; set; }
+
+    /// <summary>距最近一次提交已过的秒数（服务端算一次——页面拿到后按本地时钟续算，进度条才走得动）。</summary>
+    public double ElapsedSeconds { get; set; }
+
+    /// <summary>进度条满格秒数（= 反查触发点）。</summary>
+    public int WindowSeconds { get; set; }
+
+    /// <summary>反查是否正在跑。</summary>
+    public bool Checking { get; set; }
+
+    /// <summary>反查结论 / 说明（空 = 无）。</summary>
+    public string Detail { get; set; } = "";
 }

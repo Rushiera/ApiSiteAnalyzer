@@ -106,6 +106,26 @@
   .card.clickable:hover{border-color:var(--accent)}
   .card.clickable .k::after{content:' ↗';color:var(--accent)}
 
+  /* 工作状态（总览顶部）——按「最近一次提交」距现在多久画进度条：
+     0–30s 工作中（绿）· 30–180s 疑似停工（黄）· 满 180s 触发一次全站反查，确认全站无新记录才「已停工」（红） */
+  .workchip{display:none;align-items:center;gap:8px;padding:5px 10px;border-radius:6px;
+    border:1px solid var(--line);background:var(--panel)}
+  body.all-mode .workchip{display:flex}
+  .workchip .wclabel{font-size:12px;font-weight:600;letter-spacing:.04em;color:var(--dim);white-space:nowrap}
+  .workchip .wctrack{width:110px;height:8px;border-radius:4px;background:#1c222b;overflow:hidden}
+  .workchip .wcfill{display:block;height:100%;width:0;border-radius:4px;background:var(--dim);
+    transition:width .2s linear,background-color .2s}
+  .workchip .wcsec{font-size:11px;color:var(--dim);font-variant-numeric:tabular-nums;min-width:38px;text-align:right}
+  .workchip.working{border-color:#204a35}
+  .workchip.working .wclabel{color:var(--ok)}
+  .workchip.working .wcfill{background:var(--ok)}
+  .workchip.suspect{border-color:#4a3c1e}
+  .workchip.suspect .wclabel{color:var(--warn)}
+  .workchip.suspect .wcfill{background:var(--warn)}
+  .workchip.stopped{border-color:#5a2a26}
+  .workchip.stopped .wclabel{color:var(--bad)}
+  .workchip.stopped .wcfill{background:var(--bad)}
+
   /* 设置弹窗（双击「拉取数据」打开） */
   .mask{position:fixed;inset:0;background:rgba(6,8,12,.66);display:none;align-items:center;justify-content:center;z-index:50}
   .mask.show{display:flex}
@@ -121,22 +141,20 @@
   .dialog .actions{display:flex;gap:8px;align-items:center;margin-top:18px}
   .dialog .actions .spacer{flex:1}
 
-  /* 站点块（总览视图）——每站一块：真实余额 / 本地汇总 / 上次拉取 */
-  .siteblocks{display:none;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:12px;margin:14px 0}
-  body.all-mode .siteblocks{display:grid}
+  /* 站点表（总览视图）——一站一行：站点 / 通道 / 真实余额 / 登录态 / 下次采集 / 本地汇总 / 上次拉取 / 自动采集 */
+  .siteblocks{display:none;margin:14px 0;overflow-x:auto}
+  body.all-mode .siteblocks{display:block}
   /* 总览没有单站余额与单站口径——那两行只在单站视图显示 */
   body.all-mode .balance{display:none}
   body.all-mode .official{display:none}
-  .siteblock{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:13px 15px}
-  .siteblock .head{display:flex;align-items:center;gap:8px;margin-bottom:8px}
-  .siteblock .name{font-weight:600}
-  .siteblock .bal{font-size:22px;font-weight:700;color:var(--gold);font-variant-numeric:tabular-nums;line-height:1.2;word-break:break-all}
-  .siteblock .bal.muted{color:var(--dim);font-size:15px;font-weight:600}
-  .siteblock .sub{color:var(--dim);font-size:11px;margin-top:5px}
-  .siteblock .facts{margin-top:10px;padding-top:9px;border-top:1px solid var(--line);display:grid;
-    grid-template-columns:1fr 1fr;gap:5px 10px;font-size:12px}
-  .siteblock .facts .k{color:var(--dim)}
-  .siteblock .facts .v{font-variant-numeric:tabular-nums}
+  /* 余额格：主值 + 副行小字（原始 quota 换算 / 不设限 / 未探测引导） */
+  .siteblocks .bal{font-size:14px;font-weight:700;color:var(--gold);font-variant-numeric:tabular-nums}
+  .siteblocks .bal.muted{color:var(--dim);font-weight:600}
+  .siteblocks .sub{color:var(--dim);font-size:11px;margin-top:2px}
+  /* 站点格：名称 + 通道标签同格 */
+  .siteblocks .name{font-weight:600;margin-right:6px}
+  /* 自动采集格：说明较长——允许换行，不把整表撑宽 */
+  .siteblocks td.auto{white-space:normal;min-width:170px;max-width:260px}
   /* 站点列——只在总览视图显示（单站视图里整列冗余） */
   .colsite{display:none}
   body.all-mode .colsite{display:table-cell}
@@ -162,6 +180,11 @@
     <div class="spacer"></div>
     <span class="muted" id="version" title=""></span>
     <span class="muted" id="autoState" title="双击「拉取数据」可改设置"></span>
+    <div class="workchip" id="workChip">
+      <span class="wclabel" id="workLabel">—</span>
+      <span class="wctrack"><span class="wcfill" id="workFill"></span></span>
+      <span class="wcsec" id="workSec">—</span>
+    </div>
     <button id="btnCheck">检查登录</button>
     <button id="btnLogin">去登录</button>
     <button id="btnFetch" class="primary" title="单击＝按当前设置拉取　双击＝打开设置">拉取数据</button>
@@ -236,7 +259,16 @@
     <div class="stamp" id="officialStamp"></div>
   </div>
 
-  <div class="siteblocks" id="siteBlocks"></div>
+  <div class="siteblocks" id="siteBlocks">
+    <table id="siteTable">
+      <thead><tr>
+        <th>站点</th><th>通道</th><th>真实余额</th><th>登录态</th>
+        <th class="num">下次采集</th><th class="num">本地记录</th><th class="num">本地消费</th>
+        <th class="num">库内行数</th><th>上次拉取</th><th>自动采集</th>
+      </tr></thead>
+      <tbody id="siteRows"></tbody>
+    </table>
+  </div>
 
   <div class="cards" id="cards"></div>
 
@@ -368,7 +400,7 @@ function applyMode(){
   $('btnCheck').disabled = all;
   $('btnLogin').disabled = all;
   $('btnFetch').disabled = all;
-  if(all){ $('siteBlocks').innerHTML = ''; }
+  if(all){ $('siteRows').innerHTML = ''; }
 }
 
 function renderOfficial(){
@@ -601,26 +633,30 @@ async function loadAnalysis(){
   if(r.sites){ lastSites = r.sites; renderSiteBlocks(r.sites); }
 }
 
-/* 站点块（总览视图）——每站一块：
+/* 站点表（总览视图）——一站一行：
    直连通道没有余额接口的站点按「不设限」展示（不是 0、也不是取数失败）；
    浏览器通道站点显示最近一次探到的真实余额（没探过就如实说未探测）。 */
 function renderSiteBlocks(sites){
-  const el = $('siteBlocks');
-  if(!sites || !sites.length){ el.innerHTML = '<div class="muted">未配置站点</div>'; return; }
+  const el = $('siteRows');
+  if(!sites || !sites.length){
+    el.innerHTML = '<tr><td colspan="10" class="muted">未配置站点</td></tr>';
+    return;
+  }
   el.innerHTML = sites.map(s => {
     const direct = s.channel === 'apikey';
+    /* 余额格：主值 + 副行小字——直连站无余额接口按「不设限」展示，浏览器站没探过就如实说未探测 */
     let bal, sub;
     if(s.unlimitedBalance){
-      bal = '<div class="bal">不设限</div>';
+      bal = '<span class="bal">不设限</span>';
       sub = '该站无余额接口——按站点口径显示「不设限」';
     }else if(s.balance > 0){
-      bal = '<div class="bal">' + esc(fmtAmount8(s.balance / s.quotaPerUnit, s.currencySymbol)) + '</div>';
+      bal = '<span class="bal">' + esc(fmtAmount8(s.balance / s.quotaPerUnit, s.currencySymbol)) + '</span>';
       sub = '原始 ' + fmtNum(s.balance) + ' quota · 1 ' + esc(s.currencySymbol) + ' = ' + fmtNum(s.quotaPerUnit) + ' quota';
     }else{
-      bal = '<div class="bal muted">未探测</div>';
+      bal = '<span class="bal muted">未探测</span>';
       sub = '选该站点后点「检查登录」取真实余额';
     }
-    /* 自动采集状态——异常 / 停采在站点块上直接标出；块内数字始终是本地库已有的数据 */
+    /* 自动采集状态——异常 / 停采在该行直接标出；行内数字始终是本地库已有的数据 */
     const a = autoSites[s.id];
     let autoText = '—', autoFlag = '';
     if(a){
@@ -648,22 +684,19 @@ function renderSiteBlocks(sites){
         loginFlag = '<span class="tag bad" title="' + esc(lg.message || '') + '">' + (direct ? 'key 无效' : '未登录') + '</span>';
       }
     }
-    const facts = [
-      ['登录态', loginText],
-      ['下次采集', a && a.nextAt ? a.nextAt.substring(11, 19) : '—'],
-      ['本地记录', fmtNum(s.count) + ' 条'],
-      ['本地消费', fmtAmount(s.amount, s.currencySymbol)],
-      ['库内行数', fmtNum(s.rows)],
-      ['上次拉取', s.lastFetchAt || '—'],
-      ['自动采集', autoText],
-    ];
-    return '<div class="siteblock">' +
-      '<div class="head"><span class="name">' + esc(s.displayName) + '</span>' +
-      '<span class="tag">' + (direct ? 'API key 直连' : '浏览器') + '</span>' + autoFlag + loginFlag + '</div>' +
-      bal + '<div class="sub">' + esc(sub) + '</div>' +
-      '<div class="facts">' + facts.map(f =>
-        '<div><span class="k">' + esc(f[0]) + '</span> <span class="v">' + esc(f[1]) + '</span></div>').join('') +
-      '</div></div>';
+    /* 一站一行——列序与表头一致：站点 / 通道 / 真实余额 / 登录态 / 下次采集 / 本地记录 / 本地消费 / 库内行数 / 上次拉取 / 自动采集 */
+    return '<tr>' +
+      '<td><span class="name">' + esc(s.displayName) + '</span></td>' +
+      '<td><span class="tag">' + (direct ? 'API key 直连' : '浏览器') + '</span></td>' +
+      '<td>' + bal + '<div class="sub">' + esc(sub) + '</div></td>' +
+      '<td>' + esc(loginText) + (loginFlag ? ' ' + loginFlag : '') + '</td>' +
+      '<td class="num">' + esc(a && a.nextAt ? a.nextAt.substring(11, 19) : '—') + '</td>' +
+      '<td class="num">' + fmtNum(s.count) + ' 条</td>' +
+      '<td class="num">' + fmtAmount(s.amount, s.currencySymbol) + '</td>' +
+      '<td class="num">' + fmtNum(s.rows) + '</td>' +
+      '<td>' + esc(s.lastFetchAt || '—') + '</td>' +
+      '<td class="auto">' + esc(autoText) + (autoFlag ? ' ' + autoFlag : '') + '</td>' +
+      '</tr>';
   }).join('');
 }
 
@@ -718,6 +751,8 @@ async function startFetch(full){
 
 /* 各站自动采集状态（/api/progress 每 3 秒刷新）与最近一次站点块数据——站点块据此标「异常」 */
 let autoSites = {}, lastSites = null;
+/* 工作状态（服务端给「最近一次提交时刻」与档位）——页面按本地时钟续算，进度条才走得动 */
+let work = null;
 
 /* ---------- 采集设置（双击「拉取数据」打开） ---------- */
 /* 计时归服务端（AutoCollector）——页面只负责显示与改设置：
@@ -731,6 +766,30 @@ function renderSettings(){
   $('optInterval').value = settings.autoIntervalSeconds;
   $('optIntervalVal').textContent = settings.autoIntervalSeconds + ' s';
   $('optIncremental').checked = settings.incremental;
+}
+
+/* 工作状态（总览顶部）——按「最近一次提交」距现在多久画进度条：
+   <30s 工作中（绿）· 30–180s 疑似停工（黄）· 满 180s 触发一次全站反查，
+   确认所有站都没有新记录才「已停工」（红）。进度条 0→180s 铺满，满格即反查触发点。 */
+function renderWork(){
+  const el = $('workChip');
+  const full = (work && work.windowSeconds) ? work.windowSeconds : 180;
+  /* 时刻用服务端给的（同一台机器、同一时钟）——本地续算，进度条才一秒一秒地走 */
+  const at = work ? work.lastSubmitAt : 0;
+  const elapsed = at > 0 ? Math.max(0, Date.now()/1000 - at) : 0;
+  const pct = at > 0 ? Math.min(100, elapsed / full * 100) : 0;
+  el.className = 'workchip' + (work && work.state ? ' ' + work.state : '');
+  $('workLabel').textContent = work ? (work.label || '—') : '—';
+  $('workFill').style.width = pct.toFixed(1) + '%';
+  $('workSec').textContent = at > 0
+    ? (elapsed < 60 ? Math.round(elapsed) + 's' : (elapsed / 60).toFixed(1) + 'm')
+    : '—';
+  let tip = at > 0
+    ? '最近一次提交：' + fmtTime(at) + '（' + Math.round(elapsed) + ' 秒前）'
+    : '库内还没有记录';
+  tip += '　满 ' + full + ' 秒没有新提交 → 触发一次全站反查（无视自动采集开关 / 降级 / 停采）；全站都没有新记录才判「已停工」';
+  if(work && work.detail){ tip += '　' + work.detail; }
+  el.title = tip;
 }
 
 /* 顶部自动采集指示——逐站状态由服务端给（各站独立计时，页面刷新也能看到同一个时刻） */
@@ -785,6 +844,8 @@ async function refreshAutoState(){
   }
   /* 登录态同余额一样按站点分开记——站点块据此显示各站是否掉登录 */
   if(p.logins){ logins = p.logins; }
+  /* 工作状态（最近提交时刻 + 档位）——顶部状态条据此画进度条 */
+  if(p.work){ work = p.work; renderWork(); }
   /* 站点块上的自动采集状态跟着刷新（总览视图） */
   if(isAll() && lastSites){ renderSiteBlocks(lastSites); }
 }
@@ -903,6 +964,8 @@ $('cards').onclick = (e) => {
   await loadSettings();
   await refreshAutoState();
   setInterval(refreshAutoState, 3000);
+  /* 工作状态条每 200ms 重画一次——服务端 3 秒给一次时刻，秒数由页面自己续算，进度条才连续 */
+  setInterval(renderWork, 200);
   await loadAnalysis();
   /* 总览不是真实站点——没有登录态可查 */
   if(!isAll()) await checkLogin();
@@ -913,6 +976,7 @@ async function poll(){
   timer = setInterval(async () => {
     const r = await fetch('/api/progress').then(x=>x.json());
     renderAutoState(r);
+    if(r.work){ work = r.work; renderWork(); }
     if(r.phase === 'running'){ setStatus('采集中 · ' + r.message); return; }
     clearInterval(timer); timer = null;
     if(r.phase === 'done'){

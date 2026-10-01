@@ -47,6 +47,7 @@ public static class ServeRunner
         var settings = new PanelSettings(Path.Combine(dataDir, "settings.json"));
         var keys = new KeyStore(Path.Combine(dataDir, "keys.json"));
         var collector = new AutoCollector(session, sites, dbPath, state, settings);
+        var watch = new WorkWatch(session, sites, dbPath, state);
 
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
@@ -482,6 +483,7 @@ public static class ServeRunner
         Console.WriteLine("自动采集：" + (settings.AutoEnabled ? "开（每 " + settings.AutoIntervalSeconds + " 秒）" : "关"));
 
         _ = collector.RunAsync(ct);
+        _ = watch.RunAsync(ct);
         OpenBrowser(url);
 
         await app.RunAsync(ct).ConfigureAwait(false);
