@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -42,6 +43,12 @@ public sealed class AutoCollector
     /// <summary>各站点的计时器（按站点清单顺序）——各站独立计时与降级，互不影响。</summary>
     private readonly List<AutoSiteTimer> _timers = new List<AutoSiteTimer>();
 
+    /// <summary>采集结果投递队列——自动 / 手动 / 全站 / 反查四条路径的结果都投到这里，由主循环统一落到站点状态上。</summary>
+    private readonly ConcurrentQueue<FetchOutcome> _outcomes = new ConcurrentQueue<FetchOutcome>();
+
+    /// <summary>待重排标志（设置改动后置位）——真正的重排在主循环里做，避免与计时读写并发。</summary>
+    private volatile bool _resetRequested;
+
     /// <summary>构造自动采集器。</summary>
     /// <param name="session">站点会话。</param>
     /// <param name="sites">站点清单。</param>
@@ -63,8 +70,15 @@ public sealed class AutoCollector
         }
     }
 
-    /// <summary>全部站点重排下一次到点时刻并清空降级 / 失败计数（设置改动后调用——从此刻起重新开始）。</summary>
+    /// <summary>请求全部站点重排下一次到点时刻并清空降级 / 失败计数（设置改动后调用——从此刻起重新开始）。
+    /// 只置标志：真正的重排由主循环执行，避免与计时读写并发。</summary>
     public void Reset()
+    {
+        _resetRequested = true;
+    }
+
+    /// <summary>全部站点重排下一次到点时刻并清空降级 / 失败计数（只在主循环线程调用）。</summary>
+    private void ResetCore()
     {
         foreach (AutoSiteTimer timer in _timers)
         {
@@ -87,7 +101,7 @@ public sealed class AutoCollector
     /// <returns>异步任务。</returns>
     public async Task RunAsync(CancellationToken ct)
     {
-        Reset();
+        ResetCore();
 
         // [段1] 立刻对外公布一次状态——否则面板首屏（早于第一次 tick）会显示默认的「关」，
         //        用户看到的是「设置开着、顶部说关着」，持续约一秒的误导
@@ -104,11 +118,19 @@ public sealed class AutoCollector
                 return;
             }
 
+            // [段2] 先把外部投递的结果与重排请求落到状态上——四条采集路径共用一个出口
+            if (_resetRequested)
+            {
+                _resetRequested = false;
+                ResetCore();
+            }
+
+            DrainOutcomes();
             Publish();
 
             if (!_settings.AutoEnabled)
             {
-                // [段2] 关着——各站到点时刻始终保持在「此刻 + 间隔」之外，重新打开后从那一刻起算
+                // [段3] 关着——各站到点时刻始终保持在「此刻 + 间隔」之外，重新打开后从那一刻起算
                 foreach (AutoSiteTimer timer in _timers)
                 {
                     timer.NextRunAt = DateTime.Now.AddSeconds(EffectiveSeconds(timer));
@@ -117,7 +139,7 @@ public sealed class AutoCollector
                 continue;
             }
 
-            // [段3] 逐站对表——各站到点独立、间隔独立，一站降级不影响别站；
+            // [段4] 逐站对表——各站到点独立、间隔独立，一站降级不影响别站；
             //        采集动作本身仍串行（状态只有一个槽位，避免同一浏览器会话被并发驱动）
             foreach (AutoSiteTimer timer in _timers)
             {
@@ -160,28 +182,19 @@ public sealed class AutoCollector
 
         try
         {
-            FetchSummary summary = await ServeRunner.FetchSiteAsync(_session, site, _dbPath, _state, _settings.Incremental).ConfigureAwait(false);
+            // 自动轮次传 null——结果由本方法直接落到状态上（同一轮不重复记账）
+            FetchSummary summary = await ServeRunner.FetchSiteAsync(_session, site, _dbPath, _state, _settings.Incremental, null).ConfigureAwait(false);
             Console.WriteLine("[" + DateTime.Now.ToString("HH:mm:ss") + "] 自动采集结束：" + _state.LastMessage());
 
-            // [段1] 采到新数据 → 回基准；没采到新数据 → 下次间隔翻倍；失败 → 同样按「没采到」翻倍，并计失败数
-            if (!summary.Ok)
+            // [段1] 结果落到站点状态上——与手动 / 全站 / 反查三条路径共用同一个出口（ApplyOutcome）
+            ApplyOutcome(timer, new FetchOutcome
             {
-                MarkFailure(timer, summary.NotLoggedIn ? "未登录" : summary.Error);
-            }
-            else if (summary.Added == 0)
-            {
-                timer.EmptyRounds++;
-                timer.FailStreak = 0;
-                timer.Error = "";
-                Console.WriteLine("[" + DateTime.Now.ToString("HH:mm:ss") + "] " + site.DisplayName +
-                    " 本轮无新增（连续 " + timer.EmptyRounds + " 轮）——下次间隔 " + EffectiveSeconds(timer) + " 秒");
-            }
-            else
-            {
-                timer.EmptyRounds = 0;
-                timer.FailStreak = 0;
-                timer.Error = "";
-            }
+                SiteId = site.Id,
+                Ok = summary.Ok,
+                Added = summary.Added,
+                Reason = summary.NotLoggedIn ? "未登录" : summary.Error,
+                FromAuto = true,
+            });
         }
         catch (Exception ex)
         {
@@ -236,6 +249,106 @@ public sealed class AutoCollector
         }
     }
     /// <summary>
+    /// 报告一次采集结果——手动单站 / 全站 / 反查三条路径采集完成后调用（自动轮次的结果在 RunOnceAsync 里直接落）。
+    /// 🔴 站点状态的唯一外部写入口：成功即解除停采并清失败计数，有新增即回基准间隔。
+    /// 结果只入队，由主循环统一落到状态上——状态只在主循环线程改，跨线程写入不与计时读写打架。
+    /// </summary>
+    /// <param name="siteId">站点键。</param>
+    /// <param name="ok">本轮是否成功。</param>
+    /// <param name="added">本轮新增条数。</param>
+    /// <param name="reason">失败原因（成功传空串）。</param>
+    /// <param name="fromAuto">是否自动轮次——只有自动轮次的「无新增」参与降级计数（手动 / 反查不干扰自动节奏）。</param>
+    public void ReportFetchResult(string siteId, bool ok, int added, string reason, bool fromAuto)
+    {
+        _outcomes.Enqueue(new FetchOutcome
+        {
+            SiteId = siteId,
+            Ok = ok,
+            Added = added,
+            Reason = reason,
+            FromAuto = fromAuto,
+        });
+    }
+
+    /// <summary>把投递队列里的结果逐条落到站点状态上（主循环每 tick 调一次）。</summary>
+    private void DrainOutcomes()
+    {
+        while (_outcomes.TryDequeue(out FetchOutcome? outcome))
+        {
+            if (outcome is null)
+            {
+                continue;
+            }
+
+            AutoSiteTimer? timer = FindTimer(outcome.SiteId);
+            if (timer is null)
+            {
+                continue;
+            }
+
+            ApplyOutcome(timer, outcome);
+        }
+    }
+
+    /// <summary>按站点键取计时器（找不到返回 null——站点清单变了时如实跳过，不静默落到别站）。</summary>
+    /// <param name="siteId">站点键。</param>
+    /// <returns>该站计时器；找不到返回 null。</returns>
+    private AutoSiteTimer? FindTimer(string siteId)
+    {
+        foreach (AutoSiteTimer timer in _timers)
+        {
+            if (string.Equals(timer.Site.Id, siteId, StringComparison.Ordinal))
+            {
+                return timer;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// 把一次采集结果落到站点状态上——自动 / 手动 / 全站 / 反查四条路径的**唯一出口**。
+    /// 成功即解除停采并清失败计数（能取到数 = 站点已恢复）；有新增即回基准间隔；
+    /// 失败累加计数、连续达上限即停采；只有自动轮次的「无新增」参与降级计数。
+    /// </summary>
+    /// <param name="timer">站点计时器。</param>
+    /// <param name="outcome">采集结果。</param>
+    private void ApplyOutcome(AutoSiteTimer timer, FetchOutcome outcome)
+    {
+        if (!outcome.Ok)
+        {
+            MarkFailure(timer, outcome.Reason);
+            return;
+        }
+
+        bool recovered = timer.Stopped;
+        timer.FailStreak = 0;
+        timer.Error = "";
+        timer.Stopped = false;
+
+        if (recovered)
+        {
+            Console.WriteLine("[" + DateTime.Now.ToString("HH:mm:ss") + "] " + timer.Site.DisplayName +
+                " 采集成功——解除停采，恢复自动采集");
+        }
+
+        if (outcome.Added > 0)
+        {
+            timer.EmptyRounds = 0;
+            return;
+        }
+
+        if (!outcome.FromAuto)
+        {
+            return;
+        }
+
+        timer.EmptyRounds = timer.EmptyRounds + 1;
+        Console.WriteLine("[" + DateTime.Now.ToString("HH:mm:ss") + "] " + timer.Site.DisplayName +
+            " 本轮无新增（连续 " + timer.EmptyRounds + " 轮）——下次间隔 " + EffectiveSeconds(timer) + " 秒");
+    }
+
+    /// <summary>
     /// 记一次采集失败——失败同样「没采到数据」：降级计数 +1（下次间隔翻倍），连续失败达上限即停该站。
     /// 停采只停自动采集，不动库内数据——面板继续用本地历史已有的数据展示。
     /// </summary>
@@ -283,4 +396,25 @@ internal sealed class AutoSiteTimer
 
     /// <summary>最近一次失败原因（空 = 正常）。</summary>
     public string Error { get; set; } = "";
+}
+
+/// <summary>
+/// 一次采集结果（跨线程投递用）——四条采集路径的结果都收敛成这一份，由主循环统一落到站点状态上。
+/// </summary>
+internal sealed class FetchOutcome
+{
+    /// <summary>站点键。</summary>
+    public string SiteId { get; set; } = "";
+
+    /// <summary>本轮是否成功。</summary>
+    public bool Ok { get; set; }
+
+    /// <summary>本轮新增条数。</summary>
+    public int Added { get; set; }
+
+    /// <summary>失败原因（成功为空串）。</summary>
+    public string Reason { get; set; } = "";
+
+    /// <summary>是否自动轮次（只有自动轮次的「无新增」参与降级计数）。</summary>
+    public bool FromAuto { get; set; }
 }

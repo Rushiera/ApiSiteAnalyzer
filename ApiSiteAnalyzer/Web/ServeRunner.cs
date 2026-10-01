@@ -47,7 +47,7 @@ public static class ServeRunner
         var settings = new PanelSettings(Path.Combine(dataDir, "settings.json"));
         var keys = new KeyStore(Path.Combine(dataDir, "keys.json"));
         var collector = new AutoCollector(session, sites, dbPath, state, settings);
-        var watch = new WorkWatch(session, sites, dbPath, state);
+        var watch = new WorkWatch(session, sites, dbPath, state, collector);
 
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
@@ -413,7 +413,7 @@ public static class ServeRunner
                 {
                     try
                     {
-                        await FetchAllSitesAsync(session, sites, dbPath, state, batchIncremental).ConfigureAwait(false);
+                        await FetchAllSitesAsync(session, sites, dbPath, state, batchIncremental, collector).ConfigureAwait(false);
                     }
                     catch (Exception ex)
                     {
@@ -444,7 +444,7 @@ public static class ServeRunner
             {
                 try
                 {
-                    await FetchSiteAsync(session, site, dbPath, state, incremental).ConfigureAwait(false);
+                    await FetchSiteAsync(session, site, dbPath, state, incremental, collector).ConfigureAwait(false);
                 }
                 catch (Exception ex)
                 {
@@ -932,8 +932,9 @@ public static class ServeRunner
     /// <param name="dbPath">库路径。</param>
     /// <param name="state">面板运行态。</param>
     /// <param name="incremental">是否增量（追平历史即停）。</param>
+    /// <param name="collector">自动采集器（结果上报口）——手动 / 全站 / 反查三条路径传它；自动轮次传 null（它在 RunOnceAsync 里自行落状态，避免同一轮被记两次）。</param>
     /// <returns>拉取汇总（含新增条数——自动采集据此决定是否降级间隔）。</returns>
-    public static async Task<FetchSummary> FetchSiteAsync(SiteSession session, IApiSite site, string dbPath, PanelState state, bool incremental)
+    public static async Task<FetchSummary> FetchSiteAsync(SiteSession session, IApiSite site, string dbPath, PanelState state, bool incremental, AutoCollector? collector)
     {
         using var db = new Db(dbPath);
 
@@ -956,6 +957,12 @@ public static class ServeRunner
             else
             {
                 state.Fail(summary.Error);
+            }
+
+            // [段0] 结果上报——失败同样入账：连续失败达上限即停该站（自动 / 手动 / 全站 / 反查口径一致）
+            if (collector is not null)
+            {
+                collector.ReportFetchResult(site.Id, false, 0, summary.NotLoggedIn ? "未登录" : summary.Error, false);
             }
 
             return summary;
@@ -982,6 +989,13 @@ public static class ServeRunner
 
         state.Done("完成：拉取 " + summary.Pages + " 页 / " + summary.Fetched + " 条 · 新增 " + summary.Added +
             " 条 · 库内 " + rows + " 行" + (summary.StoppedEarly ? " · 已追平历史（提前停止）" : ""));
+
+        // [段2] 结果上报——成功即解除停采并清失败计数（能取到数 = 站点已恢复）；有新增即回基准间隔
+        if (collector is not null)
+        {
+            collector.ReportFetchResult(site.Id, true, summary.Added, "", false);
+        }
+
         return summary;
     }
 
@@ -995,8 +1009,9 @@ public static class ServeRunner
     /// <param name="dbPath">库路径。</param>
     /// <param name="state">面板运行态（整轮的进度与收口都在这里）。</param>
     /// <param name="incremental">是否增量（追平历史即停）。</param>
+    /// <param name="collector">自动采集器（结果上报口——逐站结果都落到各站状态上，成功即解除该站停采）。</param>
     /// <returns>异步任务。</returns>
-    public static async Task FetchAllSitesAsync(SiteSession session, List<IApiSite> sites, string dbPath, PanelState state, bool incremental)
+    public static async Task FetchAllSitesAsync(SiteSession session, List<IApiSite> sites, string dbPath, PanelState state, bool incremental, AutoCollector? collector)
     {
         var failures = new List<string>();
         int okCount = 0;
@@ -1007,7 +1022,7 @@ public static class ServeRunner
             state.NextBatchSite(site.Id, site.DisplayName);
             try
             {
-                FetchSummary summary = await FetchSiteAsync(session, site, dbPath, state, incremental).ConfigureAwait(false);
+                FetchSummary summary = await FetchSiteAsync(session, site, dbPath, state, incremental, collector).ConfigureAwait(false);
                 if (summary.Ok)
                 {
                     okCount = okCount + 1;

@@ -46,6 +46,9 @@ public sealed class WorkWatch
     /// <summary>面板运行态（采集串行槽位与对外快照都在这里）。</summary>
     private readonly PanelState _state;
 
+    /// <summary>自动采集器（反查结果的上报口——反查采到新记录即解除该站停采并回基准间隔）。</summary>
+    private readonly AutoCollector _collector;
+
     /// <summary>状态读写锁（心跳与反查任务两个线程都改下面这几个字段）。</summary>
     private readonly object _gate = new object();
 
@@ -69,12 +72,14 @@ public sealed class WorkWatch
     /// <param name="sites">站点清单。</param>
     /// <param name="dbPath">库路径。</param>
     /// <param name="state">面板运行态。</param>
-    public WorkWatch(SiteSession session, List<IApiSite> sites, string dbPath, PanelState state)
+    /// <param name="collector">自动采集器（反查结果的上报口）。</param>
+    public WorkWatch(SiteSession session, List<IApiSite> sites, string dbPath, PanelState state, AutoCollector collector)
     {
         _session = session;
         _sites = sites;
         _dbPath = dbPath;
         _state = state;
+        _collector = collector;
 
         // [段1] 站点键预取一次——心跳每秒读一次库内最新提交时刻，不必每次重新枚举适配器
         foreach (IApiSite site in sites)
@@ -238,7 +243,7 @@ public sealed class WorkWatch
 
             try
             {
-                FetchSummary summary = await ServeRunner.FetchSiteAsync(_session, site, _dbPath, _state, true).ConfigureAwait(false);
+                FetchSummary summary = await ServeRunner.FetchSiteAsync(_session, site, _dbPath, _state, true, _collector).ConfigureAwait(false);
                 if (!summary.Ok)
                 {
                     allChecked = false;
