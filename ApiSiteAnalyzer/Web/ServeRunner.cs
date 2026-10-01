@@ -333,6 +333,58 @@ public static class ServeRunner
             });
         });
 
+        // [段7b] 已探明请求 ID 明细——卡片点开的逐条清单（去重后按时刻倒序分页）
+        app.MapGet("/api/request-ids", (HttpContext context) =>
+        {
+            string siteId = context.Request.Query["site"].ToString();
+            IApiSite? site = FindSite(sites, siteId);
+            if (site is null)
+            {
+                return Results.Json(new { ok = false, error = "未知站点：" + siteId });
+            }
+
+            string range = context.Request.Query["range"].ToString();
+            if (range.Length == 0)
+            {
+                range = "consume";
+            }
+
+            int[] types = range switch
+            {
+                "all" => Array.Empty<int>(),
+                "consume" => new[] { 2 },
+                _ => new[] { 2 },
+            };
+
+            // [段1] 分页参数——缺省取默认值；给了但非法一律报错（入口面零容忍，不静默回落）
+            int offset = 0;
+            string offsetRaw = context.Request.Query["offset"].ToString();
+            if (offsetRaw.Length > 0 && (!int.TryParse(offsetRaw, out offset) || offset < 0))
+            {
+                return Results.Json(new { ok = false, error = "offset 非法：" + offsetRaw });
+            }
+
+            int limit = 200;
+            string limitRaw = context.Request.Query["limit"].ToString();
+            if (limitRaw.Length > 0 && (!int.TryParse(limitRaw, out limit) || limit < 1 || limit > 500))
+            {
+                return Results.Json(new { ok = false, error = "limit 非法（1-500）：" + limitRaw });
+            }
+
+            using var db = new Db(dbPath);
+            long total = db.RequestIdTotal(site.Id, types);
+            List<RequestIdRow> items = db.RequestIds(site.Id, types, limit, offset);
+
+            return Results.Json(new
+            {
+                ok = true,
+                total = total,
+                offset = offset,
+                limit = limit,
+                items = items.Select(r => new { requestId = r.RequestId, createdAt = r.CreatedAt }),
+            });
+        });
+
         // [段8] 启动浏览器并打地址
         string url = "http://127.0.0.1:" + config.Port + "/";
         Console.WriteLine("ApiSiteAnalyzer 面板已启动：" + url);

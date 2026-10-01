@@ -125,6 +125,16 @@ public sealed class OverviewStat
     public long RecentSampleCount { get; set; }
 }
 
+/// <summary>库内一条已探明请求 ID（去重后）及其出现时刻。</summary>
+public sealed class RequestIdRow
+{
+    /// <summary>站点请求 ID（库内稳定主键的来源）。</summary>
+    public string RequestId { get; set; } = "";
+
+    /// <summary>该请求的时刻（unix 秒）。</summary>
+    public long CreatedAt { get; set; }
+}
+
 /// <summary>
 /// SQLite 库——用量记录的唯一落点。
 /// 幂等写入：主键 (site_id, log_key)，重复拉取不产生重复行。
@@ -507,6 +517,56 @@ ON CONFLICT (site_id) DO UPDATE SET fetched_at=excluded.fetched_at, total_count=
         }
 
         return stat;
+    }
+    /// <summary>库内已探明请求 ID 总数（去重——口径与总览卡片的「已探明请求 ID」一致）。</summary>
+    /// <param name="siteId">站点键。</param>
+    /// <param name="types">记录类型白名单（空 = 全部）。</param>
+    /// <returns>去重后的请求 ID 数。</returns>
+    public long RequestIdTotal(string siteId, IReadOnlyList<int> types)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(DISTINCT request_id) FROM usage_log " +
+            "WHERE site_id=$site AND request_id <> ''" + BuildTypeFilter(cmd, types) + ";";
+        cmd.Parameters.AddWithValue("$site", siteId);
+
+        object? value = cmd.ExecuteScalar();
+        if (value is null || value is DBNull)
+        {
+            return 0;
+        }
+
+        return Convert.ToInt64(value);
+    }
+    /// <summary>
+    /// 按时刻倒序分页取已探明请求 ID（去重——口径与总览卡片的「已探明请求 ID」一致）。
+    /// 排序带次级键 request_id，保证分页稳定（仅按时刻排序时同刻行次序不定，翻页会重复 / 漏行）。
+    /// </summary>
+    /// <param name="siteId">站点键。</param>
+    /// <param name="types">记录类型白名单（空 = 全部）。</param>
+    /// <param name="limit">本页条数。</param>
+    /// <param name="offset">起始偏移。</param>
+    /// <returns>请求 ID 行（含时刻，按时刻倒序）。</returns>
+    public List<RequestIdRow> RequestIds(string siteId, IReadOnlyList<int> types, int limit, int offset)
+    {
+        var rows = new List<RequestIdRow>();
+
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT request_id, MAX(created_at) AS t FROM usage_log " +
+            "WHERE site_id=$site AND request_id <> ''" + BuildTypeFilter(cmd, types) +
+            " GROUP BY request_id ORDER BY t DESC, request_id ASC LIMIT " + limit + " OFFSET " + offset + ";";
+        cmd.Parameters.AddWithValue("$site", siteId);
+
+        using SqliteDataReader reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            rows.Add(new RequestIdRow
+            {
+                RequestId = reader.GetString(0),
+                CreatedAt = reader.GetInt64(1),
+            });
+        }
+
+        return rows;
     }
 
     /// <summary>按模型聚合。</summary>

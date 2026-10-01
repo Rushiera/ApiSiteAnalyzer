@@ -69,6 +69,10 @@
   .auto-on{color:var(--accent)}
   /* 输入列下方小字：A（命中缓存 B）——A = 输入 − 缓存（未命中部分） */
   .cacheline{font-size:11px;color:var(--gold);font-weight:400;line-height:1.35}
+  /* 可点卡片——点开逐条明细弹窗 */
+  .card.clickable{cursor:pointer;transition:border-color .15s}
+  .card.clickable:hover{border-color:var(--accent)}
+  .card.clickable .k::after{content:' ↗';color:var(--accent)}
 
   /* 设置弹窗（双击「拉取数据」打开） */
   .mask{position:fixed;inset:0;background:rgba(6,8,12,.66);display:none;align-items:center;justify-content:center;z-index:50}
@@ -84,6 +88,14 @@
   .dialog .val{width:56px;text-align:right;font-variant-numeric:tabular-nums;color:var(--accent);font-weight:600}
   .dialog .actions{display:flex;gap:8px;align-items:center;margin-top:18px}
   .dialog .actions .spacer{flex:1}
+
+  /* 请求 ID 明细弹窗（点「已探明请求 ID」卡片打开） */
+  .dialog.wide{width:min(760px,94vw)}
+  .dialog .ids{max-height:54vh;overflow:auto;border:1px solid var(--line);border-radius:8px}
+  .dialog .ids table{border:none;border-radius:0}
+  .dialog .ids th{top:0}
+  /* 弹窗内请求 ID 显示全文（不省略）——便于逐条核对 / 复制 */
+  .dialog .ids .reqid{max-width:none;white-space:normal;word-break:break-all;color:var(--text)}
 </style>
 </head>
 <body>
@@ -125,6 +137,24 @@
         <div class="spacer"></div>
         <button id="btnCancel">取消</button>
         <button id="btnSave" class="primary">保存并立即拉取</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="mask" id="idmask">
+    <div class="dialog wide">
+      <h3>已探明请求 ID</h3>
+      <div class="hint" id="idhint">读取中…</div>
+      <div class="ids">
+        <table id="idtable">
+          <thead><tr><th style="width:64px">#</th><th>请求 ID</th><th style="width:170px">时间</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="actions">
+        <button id="btnIdMore">加载更多</button>
+        <div class="spacer"></div>
+        <button id="btnIdClose">关闭</button>
       </div>
     </div>
   </div>
@@ -295,7 +325,7 @@ function renderCards(o, sym){
   const items = [
     ['本地记录数', fmtNum(o.count)],
     ['本地消费金额', fmtAmount(o.amount, sym)],
-    ['已探明请求 ID', fmtNum(o.requestIdCount)],
+    ['已探明请求 ID', fmtNum(o.requestIdCount), 'requestIds'],
     ['输入 Token', fmtNum(o.promptTokens)],
     ['输出 Token', fmtNum(o.completionTokens)],
     ['缓存 Token', fmtNum(o.cacheTokens)],
@@ -305,7 +335,8 @@ function renderCards(o, sym){
     [win + '平均速率', o.recentAvgSpeedTps.toFixed(1) + ' t/s'],
   ];
   $('cards').innerHTML = items.map(it =>
-    '<div class="card"><div class="k">'+esc(it[0])+'</div><div class="v">'+esc(it[1])+'</div></div>').join('');
+    '<div class="card' + (it[2] ? ' clickable' : '') + '"' + (it[2] ? ' data-key="' + it[2] + '"' : '') +
+    '><div class="k">'+esc(it[0])+'</div><div class="v">'+esc(it[1])+'</div></div>').join('');
 }
 
 /* 输入列下方小黄字：A（命中缓存 B）——A = 输入 − 缓存（未命中部分），B = 缓存 token */
@@ -447,6 +478,53 @@ async function saveSettings(){
   return true;
 }
 
+/* ---------- 已探明请求 ID 明细（点卡片打开） ---------- */
+/* 口径与卡片数字同一套：库内 request_id 去重（非空），按时刻倒序分页取 */
+const ID_PAGE = 200;
+let idTotal = 0, idOffset = 0, idShown = 0, idLoading = false;
+
+function appendIdRows(items){
+  const tb = $('idtable').querySelector('tbody');
+  tb.innerHTML += items.map(r => {
+    idShown = idShown + 1;
+    return '<tr><td class="num muted">' + idShown + '</td>' +
+      '<td><span class="reqid" title="'+esc(r.requestId)+'">'+esc(r.requestId)+'</span></td>' +
+      '<td>'+esc(fmtTime(r.createdAt))+'</td></tr>';
+  }).join('');
+}
+
+async function loadRequestIds(){
+  if(idLoading || !currentSite) return;
+  idLoading = true;
+  const url = '/api/request-ids?site=' + encodeURIComponent(currentSite) +
+    '&range=' + encodeURIComponent($('range').value) + '&offset=' + idOffset + '&limit=' + ID_PAGE;
+  const r = await fetch(url).then(x=>x.json()).catch(()=>null);
+  idLoading = false;
+  if(!r || !r.ok){
+    const msg = (r && r.error) || '接口无响应';
+    $('idhint').textContent = '读取失败：' + msg;
+    setStatus('请求 ID 读取失败：' + msg, 'bad');
+    return;
+  }
+  idTotal = r.total;
+  appendIdRows(r.items);
+  idOffset = idOffset + r.items.length;
+  $('idhint').textContent = '库内去重共 ' + fmtNum(idTotal) + ' 个 · 已显示 ' + fmtNum(idOffset) + ' 个（按时刻倒序）';
+  $('btnIdMore').disabled = idOffset >= idTotal || r.items.length === 0;
+}
+
+function openRequestIds(){
+  if(!currentSite) return;
+  idTotal = 0; idOffset = 0; idShown = 0;
+  $('idtable').querySelector('tbody').innerHTML = '';
+  $('idhint').textContent = '读取中…';
+  $('btnIdMore').disabled = true;
+  $('idmask').className = 'mask show';
+  loadRequestIds();
+}
+
+function closeRequestIds(){ $('idmask').className = 'mask'; }
+
 function openSettings(){ $('mask').className = 'mask show'; }
 function closeSettings(){ $('mask').className = 'mask'; }
 
@@ -465,6 +543,15 @@ $('btnCancel').onclick = closeSettings;
 $('mask').onclick = (e) => { if(e.target === $('mask')) closeSettings(); };
 $('btnSave').onclick = async () => { if(await saveSettings()){ closeSettings(); await startFetch(false); } };
 $('btnFull').onclick = async () => { await saveSettings(); closeSettings(); await startFetch(true); };
+
+/* 请求 ID 明细弹窗 */
+$('btnIdMore').onclick = loadRequestIds;
+$('btnIdClose').onclick = closeRequestIds;
+$('idmask').onclick = (e) => { if(e.target === $('idmask')) closeRequestIds(); };
+$('cards').onclick = (e) => {
+  const card = e.target.closest('.card.clickable');
+  if(card && card.dataset.key === 'requestIds') openRequestIds();
+};
 
 (async function(){
   await loadSites();
