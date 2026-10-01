@@ -36,6 +36,11 @@ public sealed class CdpSession : IAsyncDisposable
 
     /// <summary>消息泵任务。</summary>
     private Task? _pump;
+    /// <summary>单条 CDP 指令的等待上限（毫秒）——超时即失败，不让调用方永久挂起。
+    /// 取值须高于页面侧最坏耗时（刷新 15s + 取数 15s），否则会把正常慢请求误判成挂死。</summary>
+    private const int CommandTimeoutMs = 60000;
+    /// <summary>通道是否已判定不可用（消息泵退出后置位）——置位后指令立即失败，不静默挂起。</summary>
+    private volatile bool _closed;
 
     /// <summary>以进程句柄与已连通的 ws 构造会话。</summary>
     /// <param name="chrome">自有进程（null = 外部实例）。</param>
@@ -202,6 +207,11 @@ public sealed class CdpSession : IAsyncDisposable
     /// <summary>发一条 CDP 指令并等待回执。</summary>
     private async Task<JsonElement> SendAsync(string method, object? parameters, CancellationToken ct)
     {
+        if (_closed)
+        {
+            throw new InvalidOperationException("CDP 通道已关闭（浏览器窗口或页面已失效）");
+        }
+
         int id;
         var tcs = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
         lock (_gate)
@@ -220,12 +230,50 @@ public sealed class CdpSession : IAsyncDisposable
             payload["params"] = parameters;
         }
 
-        byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(payload);
-        await _socket.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, ct).ConfigureAwait(false);
-
-        using (ct.Register(() => tcs.TrySetCanceled(ct)))
+        try
         {
-            return await tcs.Task.ConfigureAwait(false);
+            byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(payload);
+            await _socket.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, ct).ConfigureAwait(false);
+
+            // [段1] 等待有上限——通道静默 / 浏览器退出时以超时收场，不让串行队列永久卡死
+            using var wait = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            wait.CancelAfter(CommandTimeoutMs);
+            try
+            {
+                using (wait.Token.Register(() => tcs.TrySetCanceled(wait.Token)))
+                {
+                    return await tcs.Task.ConfigureAwait(false);
+                }
+            }
+            catch (TaskCanceledException) when (!ct.IsCancellationRequested)
+            {
+                throw new TimeoutException("CDP 指令超时（" + method + " 未在 " + CommandTimeoutMs + " ms 内收到回执）");
+            }
+        }
+        finally
+        {
+            // [段2] 无论成败都摘掉等待位——失败不累积请求表
+            lock (_gate)
+            {
+                _pending.Remove(id);
+            }
+        }
+    }
+    /// <summary>把未决指令全部标记为失败（通道已不可用）——失败必须可见，不静默挂起。</summary>
+    private void FailPending()
+    {
+        _closed = true;
+
+        List<TaskCompletionSource<JsonElement>> waiters;
+        lock (_gate)
+        {
+            waiters = new List<TaskCompletionSource<JsonElement>>(_pending.Values);
+            _pending.Clear();
+        }
+
+        foreach (TaskCompletionSource<JsonElement> waiter in waiters)
+        {
+            waiter.TrySetException(new InvalidOperationException("CDP 通道已关闭（浏览器窗口或页面已失效）"));
         }
     }
 
@@ -262,6 +310,11 @@ public sealed class CdpSession : IAsyncDisposable
         catch (WebSocketException)
         {
             // 浏览器已退出——收尾
+        }
+        finally
+        {
+            // [段1] 通道一旦结束，未决指令立即失败——不让调用方在死通道上永久等待（串行队列会被它永久占用）
+            FailPending();
         }
     }
 

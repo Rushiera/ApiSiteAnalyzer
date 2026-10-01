@@ -11,6 +11,9 @@ namespace ApiSiteAnalyzer.Web;
 /// </summary>
 public sealed class TaskQueue
 {
+    /// <summary>排队等待上限（毫秒）——前一个浏览器操作卡住时，后来者以超时收场并出声，不无限等待。</summary>
+    private const int QueueWaitMs = 120000;
+
     /// <summary>串行闸门。</summary>
     private readonly SemaphoreSlim _gate = new SemaphoreSlim(1, 1);
 
@@ -26,7 +29,12 @@ public sealed class TaskQueue
     public async Task<T> RunAsync<T>(Func<Task<T>> work)
     {
         Interlocked.Increment(ref _pending);
-        await _gate.WaitAsync().ConfigureAwait(false);
+        if (!await _gate.WaitAsync(QueueWaitMs).ConfigureAwait(false))
+        {
+            Interlocked.Decrement(ref _pending);
+            throw new TimeoutException("另一个浏览器操作仍在进行中（已等待 " + (QueueWaitMs / 1000) + " 秒）——请稍后重试");
+        }
+
         try
         {
             return await work().ConfigureAwait(false);
@@ -44,7 +52,12 @@ public sealed class TaskQueue
     public async Task RunAsync(Func<Task> work)
     {
         Interlocked.Increment(ref _pending);
-        await _gate.WaitAsync().ConfigureAwait(false);
+        if (!await _gate.WaitAsync(QueueWaitMs).ConfigureAwait(false))
+        {
+            Interlocked.Decrement(ref _pending);
+            throw new TimeoutException("另一个浏览器操作仍在进行中（已等待 " + (QueueWaitMs / 1000) + " 秒）——请稍后重试");
+        }
+
         try
         {
             await work().ConfigureAwait(false);

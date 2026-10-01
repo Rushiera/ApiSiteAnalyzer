@@ -8,7 +8,10 @@
     <AssemblyName>ApiSiteAnalyzer</AssemblyName>
     <RootNamespace>ApiSiteAnalyzer</RootNamespace>
     <InvariantGlobalization>true</InvariantGlobalization>
-    <PublishDir>..\</PublishDir>
+    <!-- 发布先落 CatTemp 暂存区（仓库外），再 move 入空闲槽——
+         运行中的 exe 锁文件，直接发布到槽位会失败（KKManager 判例） -->
+    <PublishDir>..\..\CatTemp\asa-publish\</PublishDir>
+    <Version>0.3.0</Version>
   </PropertyGroup>
 
   <ItemGroup>

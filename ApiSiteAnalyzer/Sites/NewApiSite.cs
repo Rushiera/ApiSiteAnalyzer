@@ -80,7 +80,7 @@ public sealed class NewApiSite : IApiSite
   async function once(force){
     var t = await window.__asaEnsureToken(force);
     if (!t) { return { status: 401, body: '' }; }
-    var r = await fetch('/api/user/self', { credentials: 'include', headers: { 'Accept': 'application/json', 'Authorization': 'Bearer ' + t } });
+    var r = await fetch('/api/user/self', { credentials: 'include', signal: AbortSignal.timeout(15000), headers: { 'Accept': 'application/json', 'Authorization': 'Bearer ' + t } });
     return { status: r.status, body: await r.text() };
   }
   try {
@@ -108,7 +108,7 @@ public sealed class NewApiSite : IApiSite
   window.__asaEnsureToken = async function(force){
     if (window.__asaToken && !force) { return window.__asaToken; }
     if (Date.now() < window.__asaCooldownUntil) { return ''; }
-    var rf = await fetch('/api/user/auth/refresh', { method: 'POST', credentials: 'include' });
+    var rf = await fetch('/api/user/auth/refresh', { method: 'POST', credentials: 'include', signal: AbortSignal.timeout(15000) });
     if (rf.status === 429) {
       var ra = parseInt(rf.headers.get('retry-after') || '60', 10);
       window.__asaCooldownUntil = Date.now() + (isNaN(ra) ? 60 : ra) * 1000;
@@ -222,7 +222,7 @@ public sealed class NewApiSite : IApiSite
             "async function once(force){" +
             "  var t = await window.__asaEnsureToken(force);" +
             "  if (!t) { return { status: 401, body: '' }; }" +
-            "  var r = await fetch(url, { credentials: 'include', headers: { 'Accept': 'application/json', 'Authorization': 'Bearer ' + t } });" +
+            "  var r = await fetch(url, { credentials: 'include', signal: AbortSignal.timeout(15000), headers: { 'Accept': 'application/json', 'Authorization': 'Bearer ' + t } });" +
             "  return { status: r.status, body: await r.text() };" +
             "}" +
             "var res = await once(false);" +
@@ -245,7 +245,7 @@ public sealed class NewApiSite : IApiSite
             "  var t = await window.__asaEnsureToken(force);" +
             "  if (!t) { return { status: 401, body: '' }; }" +
             "  var url = '/api/data/self?start_timestamp=" + startTimestamp + "&end_timestamp=" + endTimestamp + "&default_time=hour';" +
-            "  var r = await fetch(url, { credentials: 'include', headers: { 'Accept': 'application/json', 'Authorization': 'Bearer ' + t } });" +
+            "  var r = await fetch(url, { credentials: 'include', signal: AbortSignal.timeout(15000), headers: { 'Accept': 'application/json', 'Authorization': 'Bearer ' + t } });" +
             "  return { status: r.status, body: await r.text() };" +
             "}" +
             "var res = await once(false);" +

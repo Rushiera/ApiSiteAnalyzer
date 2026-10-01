@@ -171,6 +171,25 @@ public sealed class BrowserHub
                 return (alive, false);
             }
 
+            // [段1] 登记表里没有、但该用户目录已被别的进程实例占用（CLI 与面板各自持有内存副本）——
+            //        从 chrome 自己写的 DevToolsActivePort 接管，不再起第二个
+            //        （同一用户目录起第二个会被 chrome 单例转发吃掉，新进程静默退出）
+            BrowserInstance? adopted = await TryAdoptAsync(profileDir).ConfigureAwait(false);
+            if (adopted is not null)
+            {
+                return (adopted, false);
+            }
+
+            // [段2] 用户目录被**非受控**实例占用（用户自己开的 chrome 用了同一目录）——
+            //        此时起第二个必然被单例转发吃掉、静默退出；出声给出可操作指引，不擅自杀用户进程
+            List<int> occupants = await FindOccupantsAsync(profileDir, ct).ConfigureAwait(false);
+            if (occupants.Count > 0)
+            {
+                throw new InvalidOperationException(
+                    "浏览器用户目录已被另一个 chrome 进程占用（PID " + string.Join(" / ", occupants) +
+                    "）——请关闭它后重试（登录态在该目录里，关掉不影响）");
+            }
+
             ChromeProcess chrome = await ChromeLauncher.StartWindowAsync(_chromePath, profileDir, url, 30000, ct).ConfigureAwait(false);
             var instance = new BrowserInstance
             {
@@ -193,6 +212,65 @@ public sealed class BrowserHub
         {
             _launchLock.Release();
         }
+    }
+    /// <summary>
+    /// 从用户目录里的 DevToolsActivePort（chrome 自己写的权威端口文件）接管一个已在运行的实例。
+    /// 端口探活失败即放弃（文件可能是上次运行的残留），调用方据此正常走启动流程。
+    /// 跨进程场景必需：CLI 与面板各自持有内存副本，登记表落后时不能靠"再起一个"——
+    /// 同一用户目录起第二个会被 chrome 单例转发吃掉，新进程直接退出。
+    /// </summary>
+    /// <param name="profileDir">浏览器用户数据目录。</param>
+    /// <returns>接管的实例；无可接管者返回 null。</returns>
+    private async Task<BrowserInstance?> TryAdoptAsync(string profileDir)
+    {
+        string portFile = Path.Combine(profileDir, "DevToolsActivePort");
+        if (!File.Exists(portFile))
+        {
+            return null;
+        }
+
+        int port;
+        DateTime writtenAt;
+        try
+        {
+            string[] lines = File.ReadAllLines(portFile);
+            if (lines.Length == 0 || !int.TryParse(lines[0].Trim(), out port) || port <= 0)
+            {
+                return null;
+            }
+
+            writtenAt = File.GetLastWriteTime(portFile);
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+
+        if (!await IsAliveAsync(port, CancellationToken.None).ConfigureAwait(false))
+        {
+            return null;
+        }
+
+        // 通道标签页与钩子记录是**一对**——从磁盘登记表取（别的进程可能刚写过，内存副本已过时）；
+        // 取不到就都留空：新标签页自会重新注入钩子（Page.addScriptToEvaluateOnNewDocument 按目标生效）
+        BrowserInstance? recorded = ReadRegistryEntry(profileDir);
+        var instance = new BrowserInstance
+        {
+            ProfileDir = profileDir,
+            Port = port,
+            Pid = recorded?.Pid ?? 0,
+            StartedAt = writtenAt.ToString("yyyy-MM-dd HH:mm:ss"),
+            ChannelTargetId = recorded?.ChannelTargetId ?? "",
+            HookedSites = recorded?.HookedSites ?? "",
+        };
+
+        lock (_gate)
+        {
+            _instances[profileDir] = instance;
+            SaveRegistry();
+        }
+
+        return instance;
     }
 
     /// <summary>取该实例的通道标签页页面通道——不存在则新建一个空白页并登记。</summary>
@@ -329,36 +407,66 @@ public sealed class BrowserHub
     {
         lock (_gate)
         {
-            if (!File.Exists(_registryPath))
+            BrowserRegistry? registry = ReadRegistryFile();
+            if (registry is null)
             {
                 return;
             }
 
-            try
+            foreach (BrowserInstance instance in registry.Instances)
             {
-                string text = File.ReadAllText(_registryPath);
-                BrowserRegistry? registry = JsonSerializer.Deserialize<BrowserRegistry>(text, RegistryOptions);
-                if (registry is null)
+                if (instance.ProfileDir.Length > 0)
                 {
-                    return;
+                    _instances[instance.ProfileDir] = instance;
                 }
+            }
+        }
+    }
 
-                foreach (BrowserInstance instance in registry.Instances)
-                {
-                    if (instance.ProfileDir.Length > 0)
-                    {
-                        _instances[instance.ProfileDir] = instance;
-                    }
-                }
-            }
-            catch (JsonException)
+    /// <summary>从磁盘读某用户目录的登记条目（读不到返回 null）——内存副本可能落后于别的进程刚写的值。</summary>
+    /// <param name="profileDir">浏览器用户数据目录。</param>
+    /// <returns>登记条目；无则 null。</returns>
+    private BrowserInstance? ReadRegistryEntry(string profileDir)
+    {
+        BrowserRegistry? registry = ReadRegistryFile();
+        if (registry is null)
+        {
+            return null;
+        }
+
+        foreach (BrowserInstance instance in registry.Instances)
+        {
+            if (string.Equals(instance.ProfileDir, profileDir, StringComparison.OrdinalIgnoreCase))
             {
-                // 登记表损坏——按空表处理（下次写盘覆盖）
+                return instance;
             }
-            catch (IOException)
-            {
-                // 读不到——按空表处理
-            }
+        }
+
+        return null;
+    }
+
+    /// <summary>读登记表文件（不存在 / 损坏 / 读不到一律返回 null——出声由调用方决定）。</summary>
+    private BrowserRegistry? ReadRegistryFile()
+    {
+        if (!File.Exists(_registryPath))
+        {
+            return null;
+        }
+
+        try
+        {
+            string text = File.ReadAllText(_registryPath);
+            return JsonSerializer.Deserialize<BrowserRegistry>(text, RegistryOptions);
+        }
+        catch (JsonException)
+        {
+            // 登记表损坏——按空表处理（下次写盘覆盖）
+            return null;
+        }
+        catch (IOException)
+        {
+            // 读不到——按空表处理
+            return null;
         }
     }
 

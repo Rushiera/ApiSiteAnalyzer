@@ -75,6 +75,7 @@
       <option value="all">全部记录</option>
     </select>
     <div class="spacer"></div>
+    <span class="muted" id="version" title=""></span>
     <button id="btnCheck">检查登录</button>
     <button id="btnLogin">去登录</button>
     <button id="btnFetch" class="primary">拉取数据</button>
@@ -169,6 +170,14 @@ function setStatus(text, kind){
 async function loadSites(){
   const r = await fetch('/api/sites').then(x=>x.json());
   if(!r.ok){ setStatus('站点清单读取失败', 'bad'); return; }
+  const ver = $('version');
+  const cur = 'v' + (r.version || '?');
+  if(r.hasUpdate){
+    ver.innerHTML = esc(cur) + ' <span style="color:var(--warn)">· 有新版本 ' + esc('v' + r.newestVersion) + '</span>';
+  }else{
+    ver.textContent = cur;
+  }
+  ver.title = (r.exePath || '') + (r.newestExe ? '　最新槽位：' + r.newestExe : '');
   const sel = $('site');
   sel.innerHTML = '';
   siteMap = {};

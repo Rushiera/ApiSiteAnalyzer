@@ -18,29 +18,52 @@ ApiSiteAnalyzer/                主项目
   Web/                          Minimal API 端点 + wwwroot/index.html
 config.json                     站点清单 + 端口 + chrome 路径
 data/                           运行时生成：usage.db · browsers.json · profiles/<站点>/
-ApiSiteAnalyzer.exe             单文件产物（framework-dependent，依赖 .NET 8 运行时）
+启动.bat                        启动器：停旧面板 → 起最新槽位
+ApiSiteAnalyzer_A.exe           槽位 A（部署产物，不进版本控制前先看「更新」一节）
+ApiSiteAnalyzer_B.exe           槽位 B
 ```
 
 ## 运行
 
+双击 `启动.bat`（或命令行跑 `ApiSiteAnalyzer_A.exe serve`）。子命令：
+
 ```
-ApiSiteAnalyzer.exe check    # 探测登录态（含真实余额）
-ApiSiteAnalyzer.exe fetch    # 全量拉取用量 + 口径快照入库
-ApiSiteAnalyzer.exe serve    # 起面板（默认，双击 exe 等同）
-ApiSiteAnalyzer.exe stats    # 库内计数
-ApiSiteAnalyzer.exe sites    # 站点清单
+ApiSiteAnalyzer_A.exe check    # 探测登录态（含真实余额）
+ApiSiteAnalyzer_A.exe fetch    # 全量拉取用量 + 口径快照入库
+ApiSiteAnalyzer_A.exe serve    # 起面板（默认，双击 exe 等同）
+ApiSiteAnalyzer_A.exe stats    # 库内计数
+ApiSiteAnalyzer_A.exe sites    # 站点清单
 ```
 
 开发态用 `dotnet run --project ApiSiteAnalyzer -- <子命令>`。
 
-单文件发布：
+**配置查找**：当前工作目录优先，缺则回落 exe 同级；两处都没有即报错退出（不静默起空面板）。
+配置内的相对路径（`data` 目录）一律相对**配置文件所在目录**解析，故可在任意工作目录调用。
+
+## 更新（双槽部署）
+
+**运行中的 exe 锁着自己的文件**——直接覆盖会失败。故产物分 A / B 两槽轮换：
+
+1. 发布到**仓库外的暂存区**（`ApiSiteAnalyzer.csproj` 的 `PublishDir` 已指向 `..\..\CatTemp\asa-publish\`）：
 
 ```
 dotnet publish ApiSiteAnalyzer\ApiSiteAnalyzer.csproj -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
 ```
 
-**配置查找**：当前工作目录优先，缺则回落 exe 同级；两处都没有即报错退出（不静默起空面板）。
-配置内的相对路径（`data` 目录）一律相对**配置文件所在目录**解析，故可在任意工作目录调用。
+2. 把产物移进**空闲槽**（正在跑的那一槽不动）：
+
+```
+move CatTemp\asa-publish\ApiSiteAnalyzer.exe ApiSiteAnalyzer_B.exe
+```
+
+3. 双击 `启动.bat`——它按修改时间取**最新的槽位**启动，先停掉占着 8766 端口的面板。
+
+槽位 exe **随仓走**（各 2.3 MB，体积小、方便取用）——沿用原「exe 入库」定案，仅从单件改双件。
+
+`启动.bat` **不杀浏览器实例**：登录态在浏览器用户目录里，新面板启动时会自动接管（读 `data/profiles/<站点>/DevToolsActivePort`）。
+
+**版本自证**：面板右上角显示当前运行版本；若另一槽有更新的产物，会标出「有新版本」。
+鼠标悬停可看到正在运行的可执行文件路径。跑的是哪份产物，一眼可见，不用口头核对。
 
 ## 登录
 
@@ -98,6 +121,20 @@ access_token 只活在页面里（`window.__asaToken`），从不回传程序进
     聚合时按 `> 0` 过滤（原值保留可追溯）。
 13. **模型名大小写不统一**——实测同一上游三种写法（`DeepSeek-V4.1-Flash-gq` / `DeepSeek-V4.1-Flash` / `Deepseek-V4.1-Flash`）。
     按原值入库、不归一——归一会掩盖站点的模型映射实况。
+14. **CDP 指令必须有超时**（2026-10-01 判例）——`CdpSession.SendAsync` 原先用 `CancellationToken.None` 等回执，
+    浏览器实例一换（旧端口死掉）指令就**永久挂起**；面板的浏览器操作共用一条串行队列，
+    一个挂起把「检查登录 / 去登录 / 拉取」全部堵死，表现为「一直在检查登录态」。
+    现：单条指令 60 秒上限（须高于页面侧最坏耗时 = 刷新 15s + 取数 15s）；通道关闭时未决指令立即失败；
+    队列等待另有 120 秒上限。**失败必须可见**——超时出声，不静默挂起。
+15. **用户目录是单例**（2026-10-01 判例）——同一 `--user-data-dir` 起第二个 chrome 会被单例转发吃掉，
+    新进程**静默退出**（stderr 无 `DevTools listening on`，只报"进程提前退出"）。
+    跨进程场景（CLI 与面板各有内存副本）必须**先接管再启动**：读 chrome 自己写的
+    `data/profiles/<站点>/DevToolsActivePort` 拿端口，探活通过即接管，不起第二个。
+    接管失败且目录确被占用 → 出声给出 PID，不擅自杀用户进程。
+16. **运行中的 exe 锁文件**——直接发布到仓库根会失败（`The process cannot access the file`）。
+    产物走**双槽 + 仓库外暂存区**：publish 到 `CatTemp/asa-publish/`，再 move 进空闲槽，由 `启动.bat` 起最新槽位。
+17. **面板不杀浏览器实例**——登录态在浏览器用户目录里，杀面板不动浏览器；新面板启动时自动接管既有实例（判例 15）。
+    所以更新面板**不影响登录**，不需要重新登录。
 
 ## t/s 口径复算（本地自算列）
 

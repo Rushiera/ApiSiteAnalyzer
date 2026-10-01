@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -89,7 +90,22 @@ public static class ServeRunner
                 });
             }
 
-            return Results.Json(new { ok = true, sites = list, running = state.Running });
+            // 版本自证——「跑的是哪份产物」从口头核对变成一眼可见的实况
+            string running = AppVersion();
+            (string Version, string FileName)? newest = FindNewestSlot();
+            string newestVersion = newest is null ? "" : newest.Value.Version;
+
+            return Results.Json(new
+            {
+                ok = true,
+                version = running,
+                exePath = Environment.ProcessPath ?? "",
+                newestVersion = newestVersion,
+                newestExe = newest is null ? "" : newest.Value.FileName,
+                hasUpdate = IsNewer(newestVersion, running),
+                sites = list,
+                running = state.Running,
+            });
         });
 
         // [段3] 登录态探测——未登录时面板提示「去登录」
@@ -102,18 +118,25 @@ public static class ServeRunner
                 return Results.Json(new { ok = false, error = "未知站点：" + siteId });
             }
 
-            LoginState login = await queue.RunAsync(() => session.ProbeLoginAsync(site, CancellationToken.None)).ConfigureAwait(false);
-            return Results.Json(new
+            try
             {
-                ok = true,
-                loggedIn = login.LoggedIn,
-                username = login.Username,
-                quota = login.Quota,
-                usedQuota = login.UsedQuota,
-                requestCount = login.RequestCount,
-                group = login.Group,
-                message = login.Message,
-            });
+                LoginState login = await queue.RunAsync(() => session.ProbeLoginAsync(site, CancellationToken.None)).ConfigureAwait(false);
+                return Results.Json(new
+                {
+                    ok = true,
+                    loggedIn = login.LoggedIn,
+                    username = login.Username,
+                    quota = login.Quota,
+                    usedQuota = login.UsedQuota,
+                    requestCount = login.RequestCount,
+                    group = login.Group,
+                    message = login.Message,
+                });
+            }
+            catch (Exception ex)
+            {
+                return Results.Json(new { ok = false, error = ex.Message });
+            }
         });
 
         // [段4] 打开登录窗口——受控实例，登录页在通道标签页里打开（钩子已就位，登录态留在页面内）
@@ -267,6 +290,90 @@ public static class ServeRunner
 
         await app.RunAsync(ct).ConfigureAwait(false);
         return 0;
+    }
+
+    /// <summary>本进程程序集版本（版本自证用）。</summary>
+    /// <returns>版本文本（如 0.3.0）。</returns>
+    private static string AppVersion()
+    {
+        var assembly = typeof(ServeRunner).Assembly;
+        string? info = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+        if (!string.IsNullOrEmpty(info))
+        {
+            return info;
+        }
+
+        return assembly.GetName().Version?.ToString() ?? "未知";
+    }
+
+    /// <summary>
+    /// 扫描程序目录下的槽位产物（ApiSiteAnalyzer_*.exe），取版本最高的一个。
+    /// 双槽的意义：运行中的 exe 锁文件，新产物写另一槽即可覆盖部署（KKManager 判例）。
+    /// </summary>
+    /// <returns>槽位版本 + 文件名；无槽位产物返回 null。</returns>
+    private static (string Version, string FileName)? FindNewestSlot()
+    {
+        string dir = AppContext.BaseDirectory;
+        if (dir.Length == 0 || !Directory.Exists(dir))
+        {
+            return null;
+        }
+
+        (string Version, string FileName)? best = null;
+        foreach (string path in Directory.EnumerateFiles(dir, "ApiSiteAnalyzer_*.exe"))
+        {
+            string version = ReadFileVersion(path);
+            if (version.Length == 0)
+            {
+                continue;
+            }
+
+            if (best is null || IsNewer(version, best.Value.Version))
+            {
+                best = (version, Path.GetFileName(path));
+            }
+        }
+
+        return best;
+    }
+
+    /// <summary>读 PE 文件版本（读不到返回空串——按「非候选」处理，不静默当成最新）。</summary>
+    private static string ReadFileVersion(string path)
+    {
+        try
+        {
+            return FileVersionInfo.GetVersionInfo(path).FileVersion ?? "";
+        }
+        catch (IOException)
+        {
+            return "";
+        }
+    }
+
+    /// <summary>判断候选版本是否比当前版本新（解析失败一律按「不新」——不误报更新）。</summary>
+    private static bool IsNewer(string candidate, string current)
+    {
+        Version? left = ParseVersion(candidate);
+        Version? right = ParseVersion(current);
+        if (left is null || right is null)
+        {
+            return false;
+        }
+
+        return left > right;
+    }
+
+    /// <summary>把版本文本解析成可比较对象（截掉 -preview / +build 后缀）。</summary>
+    private static Version? ParseVersion(string text)
+    {
+        string trimmed = text.Trim();
+        int cut = trimmed.IndexOfAny(new[] { '-', '+' });
+        if (cut > 0)
+        {
+            trimmed = trimmed.Substring(0, cut);
+        }
+
+        return Version.TryParse(trimmed, out Version? parsed) ? parsed : null;
     }
 
     /// <summary>把聚合行映射成前端结构。</summary>
