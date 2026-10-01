@@ -86,6 +86,15 @@ public sealed class PanelState
     /// <summary>各站点最近一次探到的登录态（键 = 站点键）——总览站点块据此显示「已登录 / 未登录 / 未探测」。</summary>
     private readonly Dictionary<string, LoginSnapshot> _logins = new Dictionary<string, LoginSnapshot>(StringComparer.Ordinal);
 
+    /// <summary>批量模式标志——全站采集（总览视图的「拉取数据」）期间为 true：整轮不因单站完成而结束。</summary>
+    private bool _batch;
+
+    /// <summary>批量模式的站点总数（进度文本「第几站 / 共几站」用）。</summary>
+    private int _batchTotal;
+
+    /// <summary>批量模式已开始的站点序号（0 = 还没开始第一站）。</summary>
+    private int _batchIndex;
+
     /// <summary>阶段：idle / running / done / failed。</summary>
     private string _phase = "idle";
 
@@ -144,6 +153,61 @@ public sealed class PanelState
             return true;
         }
     }
+    /// <summary>
+    /// 抢占一轮**全站**采集——总览视图的「拉取数据」对全部站点依次执行。
+    /// 整轮期间状态位保持运行中（中途单站完成不结束这一轮），由 EndBatch 收口。
+    /// </summary>
+    /// <param name="siteName">站点显示名（进度文本用）。</param>
+    /// <param name="total">本轮站点总数。</param>
+    /// <returns>抢到返回 true；已有采集在跑返回 false。</returns>
+    public bool TryBeginBatch(string siteName, int total)
+    {
+        lock (_gate)
+        {
+            if (_phase == "running")
+            {
+                return false;
+            }
+
+            _batch = true;
+            _batchTotal = total;
+            _batchIndex = 0;
+            _siteId = "";
+            _site = siteName;
+            _phase = "running";
+            _message = "开始全站采集（共 " + total + " 站）";
+            return true;
+        }
+    }
+    /// <summary>切到全站采集的下一站——进度文本带「(第几站 / 共几站)」，面板据此显示整轮位置。</summary>
+    /// <param name="siteId">站点键（余额按站点分开记）。</param>
+    /// <param name="siteName">站点显示名。</param>
+    public void NextBatchSite(string siteId, string siteName)
+    {
+        lock (_gate)
+        {
+            if (!_batch)
+            {
+                return;
+            }
+
+            _batchIndex = _batchIndex + 1;
+            _siteId = siteId;
+            _site = siteName;
+            _message = "(" + _batchIndex + "/" + _batchTotal + ") " + siteName;
+        }
+    }
+    /// <summary>收口一轮全站采集——退出批量模式并把整轮结果公布给面板。</summary>
+    /// <param name="text">整轮结果文本。</param>
+    public void EndBatch(string text)
+    {
+        lock (_gate)
+        {
+            _batch = false;
+            _phase = "done";
+            _message = text;
+        }
+    }
 
     /// <summary>推进一条进度。</summary>
     /// <param name="text">进度文本。</param>
@@ -158,25 +222,31 @@ public sealed class PanelState
         }
     }
 
-    /// <summary>完成。</summary>
+    /// <summary>完成——批量模式（全站采集）下只更新进度文本，整轮的收口归 EndBatch。</summary>
     /// <param name="text">结果文本。</param>
     public void Done(string text)
     {
         lock (_gate)
         {
-            _phase = "done";
             _message = text;
+            if (!_batch)
+            {
+                _phase = "done";
+            }
         }
     }
 
-    /// <summary>失败。</summary>
+    /// <summary>失败——批量模式（全站采集）下只更新进度文本：某站失败不结束整轮，原因由整轮汇总给出。</summary>
     /// <param name="text">失败原因。</param>
     public void Fail(string text)
     {
         lock (_gate)
         {
-            _phase = "failed";
             _message = text;
+            if (!_batch)
+            {
+                _phase = "failed";
+            }
         }
     }
 

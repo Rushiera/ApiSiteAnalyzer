@@ -164,6 +164,63 @@ public static class ServeRunner
         app.MapPost("/api/login-check", async (HttpContext context) =>
         {
             string siteId = await ReadFieldAsync(context, "site");
+
+            // [段3a] 总览——对**全部站点**依次探测（总览不是站点，动作落在每个站点上）；
+            //        单站失败不中断整轮，逐站如实回报（结果同时写进各站登录态缓存）
+            if (IsAllSites(siteId))
+            {
+                var probed = new List<object>();
+                int loggedInCount = 0;
+                foreach (IApiSite item in sites)
+                {
+                    try
+                    {
+                        LoginState probe = await queue.RunAsync(() => session.ProbeLoginAsync(item, CancellationToken.None)).ConfigureAwait(false);
+                        state.SetBalance(item.Id, probe.Quota);
+                        state.SetLogin(item.Id, probe.LoggedIn, probe.Username, probe.LoggedIn ? "" : probe.Message);
+                        if (probe.LoggedIn)
+                        {
+                            loggedInCount = loggedInCount + 1;
+                        }
+
+                        probed.Add(new
+                        {
+                            id = item.Id,
+                            displayName = item.DisplayName,
+                            channel = SiteAggregate.ChannelOf(item),
+                            loggedIn = probe.LoggedIn,
+                            username = probe.Username,
+                            quota = probe.Quota,
+                            requestCount = probe.RequestCount,
+                            message = probe.Message,
+                        });
+                    }
+                    catch (Exception ex)
+                    {
+                        probed.Add(new
+                        {
+                            id = item.Id,
+                            displayName = item.DisplayName,
+                            channel = SiteAggregate.ChannelOf(item),
+                            loggedIn = false,
+                            username = "",
+                            quota = 0L,
+                            requestCount = 0L,
+                            message = "检查失败：" + ex.Message,
+                        });
+                    }
+                }
+
+                return Results.Json(new
+                {
+                    ok = true,
+                    all = true,
+                    total = sites.Count,
+                    loggedInCount = loggedInCount,
+                    sites = probed,
+                });
+            }
+
             IApiSite? site = FindSite(sites, siteId);
             if (site is null)
             {
@@ -197,6 +254,74 @@ public static class ServeRunner
         app.MapPost("/api/open-login", async (HttpContext context) =>
         {
             string siteId = await ReadFieldAsync(context, "site");
+
+            // [段4a] 总览——对**全部站点**依次打开登录页（总览不是站点，动作落在每个站点上）；
+            //        直连通道没有浏览器登录这回事、已确认已登录的站点跳过（重复导航会清掉页面上的 token 缓存）
+            if (IsAllSites(siteId))
+            {
+                var results = new List<object>();
+                int openedCount = 0;
+                foreach (IApiSite item in sites)
+                {
+                    if (SiteAggregate.ChannelOf(item) == "apikey")
+                    {
+                        results.Add(new
+                        {
+                            id = item.Id,
+                            displayName = item.DisplayName,
+                            opened = false,
+                            message = "走 API key 直连通道，不需要浏览器登录",
+                        });
+                        continue;
+                    }
+
+                    LoginSnapshot? known = state.LoginOf(item.Id);
+                    if (known is not null && known.LoggedIn)
+                    {
+                        results.Add(new
+                        {
+                            id = item.Id,
+                            displayName = item.DisplayName,
+                            opened = false,
+                            message = "已登录" + (known.Username.Length > 0 ? "（" + known.Username + "）" : "") + "——跳过",
+                        });
+                        continue;
+                    }
+
+                    try
+                    {
+                        BrowserInstance instance = await queue.RunAsync(() => session.OpenLoginAsync(item, CancellationToken.None)).ConfigureAwait(false);
+                        openedCount = openedCount + 1;
+                        results.Add(new
+                        {
+                            id = item.Id,
+                            displayName = item.DisplayName,
+                            opened = true,
+                            message = "已打开登录页（端口 " + instance.Port + "）",
+                        });
+                    }
+                    catch (Exception ex)
+                    {
+                        results.Add(new
+                        {
+                            id = item.Id,
+                            displayName = item.DisplayName,
+                            opened = false,
+                            message = "打开失败：" + ex.Message,
+                        });
+                    }
+                }
+
+                return Results.Json(new
+                {
+                    ok = true,
+                    all = true,
+                    total = sites.Count,
+                    opened = openedCount,
+                    sites = results,
+                });
+            }
+
             IApiSite? site = FindSite(sites, siteId);
             if (site is null)
             {
@@ -273,6 +398,37 @@ public static class ServeRunner
         {
             string siteId = await ReadFieldAsync(context, "site");
             string full = await ReadFieldAsync(context, "full");
+
+            // [段5a] 总览——对**全部站点**依次采集（总览不是站点，采集永远发生在具体站点上）；
+            //        整轮占一个串行槽位，批量期间单站的完成 / 失败不结束这一轮（收口归 EndBatch）
+            if (IsAllSites(siteId))
+            {
+                bool batchIncremental = full != "true" && settings.Incremental;
+                if (!state.TryBeginBatch("全部站点", sites.Count))
+                {
+                    return Results.Json(new { ok = false, error = "已有采集在进行中" });
+                }
+
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await FetchAllSitesAsync(session, sites, dbPath, state, batchIncremental).ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        state.EndBatch("全站采集失败：" + ex.Message);
+                    }
+                });
+
+                return Results.Json(new
+                {
+                    ok = true,
+                    incremental = batchIncremental,
+                    message = "已开始全站采集（" + sites.Count + " 站，依次执行）",
+                });
+            }
+
             IApiSite? site = FindSite(sites, siteId);
             if (site is null)
             {
@@ -827,6 +983,55 @@ public static class ServeRunner
         state.Done("完成：拉取 " + summary.Pages + " 页 / " + summary.Fetched + " 条 · 新增 " + summary.Added +
             " 条 · 库内 " + rows + " 行" + (summary.StoppedEarly ? " · 已追平历史（提前停止）" : ""));
         return summary;
+    }
+
+    /// <summary>
+    /// 全站采集——总览视图的「拉取数据」对全部站点**依次**执行（总览不是站点，采集永远落在具体站点上）。
+    /// 采集动作串行（同一浏览器会话不能被并发驱动）；某站失败只记该站原因，不中断整轮；
+    /// 整轮由 EndBatch 收口——批量期间单站的完成 / 失败不结束这一轮（面板进度一直显示「第几站 / 共几站」）。
+    /// </summary>
+    /// <param name="session">站点会话。</param>
+    /// <param name="sites">站点清单。</param>
+    /// <param name="dbPath">库路径。</param>
+    /// <param name="state">面板运行态（整轮的进度与收口都在这里）。</param>
+    /// <param name="incremental">是否增量（追平历史即停）。</param>
+    /// <returns>异步任务。</returns>
+    public static async Task FetchAllSitesAsync(SiteSession session, List<IApiSite> sites, string dbPath, PanelState state, bool incremental)
+    {
+        var failures = new List<string>();
+        int okCount = 0;
+        int addedTotal = 0;
+
+        foreach (IApiSite site in sites)
+        {
+            state.NextBatchSite(site.Id, site.DisplayName);
+            try
+            {
+                FetchSummary summary = await FetchSiteAsync(session, site, dbPath, state, incremental).ConfigureAwait(false);
+                if (summary.Ok)
+                {
+                    okCount = okCount + 1;
+                    addedTotal = addedTotal + summary.Added;
+                }
+                else
+                {
+                    failures.Add(site.DisplayName + "：" + (summary.NotLoggedIn ? "未登录" : summary.Error));
+                }
+            }
+            catch (Exception ex)
+            {
+                state.Fail("采集失败：" + ex.Message);
+                failures.Add(site.DisplayName + "：" + ex.Message);
+            }
+        }
+
+        string text = "全站采集完成：" + sites.Count + " 站 · 成功 " + okCount + " · 新增 " + addedTotal + " 条";
+        if (failures.Count > 0)
+        {
+            text = text + " · 失败 " + failures.Count + " 站（" + string.Join("；", failures) + "）";
+        }
+
+        state.EndBatch(text);
     }
 
     /// <summary>请求体字段缓存键（HttpContext.Items）。</summary>

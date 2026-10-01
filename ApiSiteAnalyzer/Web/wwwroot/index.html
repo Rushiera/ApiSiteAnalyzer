@@ -322,7 +322,7 @@
 <script>
 const $ = (id) => document.getElementById(id);
 const TYPE_NAME = {1:'充值',2:'消费',3:'管理',4:'系统',5:'错误',6:'退款',7:'登录'};
-/* 总览键——下拉第一项，合并全部站点的记录；不是真实站点（不可探测 / 不可采集）
+/* 总览键——下拉第一项，合并全部站点的记录；不是真实站点（无适配器），操作对全部站点依次执行
    取值必须与服务端 ServeRunner.AllSitesKey 一致（后端按 '__all' 分流）——不一致时面板会报「未知站点」 */
 const ALL_SITE = '__all';
 let currentSite = '';
@@ -374,7 +374,7 @@ async function loadSites(keep){
   const sel = $('site');
   sel.innerHTML = '';
   siteMap = {};
-  /* 总览置顶——合并全部站点的记录；它不是真实站点，故不可探测 / 不可采集 */
+  /* 总览置顶——合并全部站点的记录；它不是真实站点，三个操作按钮对它按「全部站点依次执行」处理 */
   siteMap[ALL_SITE] = { id: ALL_SITE, displayName: '总览（全部站点）', channel: 'all', rows: 0 };
   const allOpt = document.createElement('option');
   allOpt.value = ALL_SITE;
@@ -397,13 +397,14 @@ async function loadSites(keep){
   renderOfficial();
 }
 
-/* 视图模式——总览（合并全部站点，不可采集）与单站（可探测 / 采集）两套布局 */
+/* 视图模式——总览（合并全部站点）与单站（单站口径）两套布局。
+   三个操作按钮在总览下同样可用：总览不是站点，操作**落在每个站点上**（对全部站点依次执行）。 */
 function applyMode(){
   const all = isAll();
   document.body.classList.toggle('all-mode', all);
-  $('btnCheck').disabled = all;
-  $('btnLogin').disabled = all;
-  $('btnFetch').disabled = all;
+  $('btnCheck').title = all ? '对全部站点依次检查登录态' : '检查本站登录态';
+  $('btnLogin').title = all ? '对全部站点依次打开登录页（直连站与已登录站跳过）' : '打开本站登录页';
+  $('btnFetch').title = all ? '单击＝对全部站点依次拉取　双击＝打开设置' : '单击＝按当前设置拉取　双击＝打开设置';
   if(all){ $('siteRows').innerHTML = ''; }
 }
 
@@ -446,7 +447,7 @@ async function switchSite(){
   await loadSites(currentSite);
   const s = siteMap[currentSite];
   setStatus(isAll()
-    ? '总览：合并全部站点的记录（逐站关键数据见站点块）——采集请选具体站点'
+    ? '总览：合并全部站点的记录（逐站关键数据见站点表）——「检查登录 / 去登录 / 拉取数据」对全部站点依次执行'
     : (s ? ('已切到「' + s.displayName + '」——点「检查登录」或「拉取数据」取数') : '未选择站点'), '');
   loadAnalysis();
 }
@@ -485,7 +486,7 @@ function renderBalance(balance){
   /* 总览没有单站余额——逐站余额在站点块里 */
   if(isAll()){
     $('balanceMain').textContent = '—';
-    $('balanceSide').textContent = '总览视图——逐站余额见下方站点块';
+    $('balanceSide').textContent = '总览视图——逐站余额见站点表';
     return;
   }
   /* 直连站点没有余额接口——不论传进来什么一律显示「不设限」（切站点后不会残留上一个站的数字） */
@@ -705,15 +706,23 @@ function renderSiteBlocks(sites){
 }
 
 async function checkLogin(){
-  if(!currentSite || isAll()) return;
+  if(!currentSite) return;
   const asked = currentSite;
-  setStatus('正在检查登录态…');
+  setStatus(isAll() ? '正在检查全部站点的登录态…' : '正在检查登录态…');
   const r = await fetch('/api/login-check', {
     method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({site: asked})
   }).then(x=>x.json());
   if(asked !== currentSite) return;
   if(!r.ok){ setStatus('检查失败：' + (r.error||''), 'bad'); return; }
+  /* 总览——逐站结论汇总到状态条；每站明细在站点表「登录态」列（服务端按站点缓存，3 秒内刷新） */
+  if(r.all){
+    const parts = (r.sites||[]).map(s => s.displayName + '：' +
+      (s.loggedIn ? (s.channel === 'apikey' ? 'key 有效' : '已登录') : (s.channel === 'apikey' ? 'key 无效' : '未登录')));
+    const bad = (r.sites||[]).filter(s => !s.loggedIn).length;
+    setStatus('全部站点 ' + r.loggedInCount + '/' + r.total + ' 可用　' + parts.join('　'), bad ? 'bad' : 'ok');
+    return;
+  }
   const s = siteMap[currentSite];
   const direct = !!(s && s.channel === 'apikey');
   if(r.loggedIn){
@@ -730,18 +739,25 @@ async function checkLogin(){
 }
 
 async function openLogin(){
-  if(!currentSite || isAll()) return;
-  setStatus('正在打开浏览器…');
+  if(!currentSite) return;
+  const all = isAll();
+  setStatus(all ? '正在为全部站点打开登录页…' : '正在打开浏览器…');
   const r = await fetch('/api/open-login', {
     method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({site: currentSite})
   }).then(x=>x.json());
   if(!r.ok){ setStatus('打开失败：' + (r.error||''), 'bad'); return; }
+  /* 总览——逐站回执（打开的 / 跳过的 / 失败的）一行说完，不逐站开弹窗 */
+  if(r.all){
+    const parts = (r.sites||[]).map(s => s.displayName + '：' + s.message);
+    setStatus('全部站点：打开 ' + r.opened + ' 个登录页　' + parts.join('　') + '（登录完成后点「检查登录」）', r.opened > 0 ? 'ok' : '');
+    return;
+  }
   setStatus(r.message + '（登录完成后点「检查登录」）', 'ok');
 }
 
 async function startFetch(full){
-  if(!currentSite || isAll()) return;
+  if(!currentSite) return;
   const body = {site: currentSite};
   if(full) body.full = 'true';
   const r = await fetch('/api/fetch', {
