@@ -133,6 +133,12 @@ public sealed class AllSitesResult
     /// <summary>再往前十次窗口（第 11–20 次）的平均输出速率（token/秒）。</summary>
     public double PrevAvgSpeedTps { get; set; }
 
+    /// <summary>近 24 小时窗口统计（各站相加）。</summary>
+    public WindowStat Last24h { get; set; } = new WindowStat();
+
+    /// <summary>前 24 小时窗口统计（各站相加）——四项对比行的参照窗口。</summary>
+    public WindowStat Prev24h { get; set; } = new WindowStat();
+
     /// <summary>按模型（跨站合并，按 token 之和倒序）。</summary>
     public List<MergedRow> ByModel { get; set; } = new List<MergedRow>();
 
@@ -215,6 +221,8 @@ public static class SiteAggregate
             result.CompletionTokens += overview.CompletionTokens;
             result.CacheTokens += overview.CacheTokens;
             result.RequestIdCount += overview.RequestIdCount;
+            result.Last24h = Add(result.Last24h, overview.Last24h);
+            result.Prev24h = Add(result.Prev24h, overview.Prev24h);
             symbols.Add(site.CurrencySymbol);
 
             // [段1] 分组行——各站取全量（limit=0）再合并，合并后按 token 之和倒序截断（截断放在合并之后，避免漏掉跨站前排）
@@ -273,6 +281,20 @@ public static class SiteAggregate
         // [段5] 货币符号——各站一致才标；混币种留空（金额是各站折算后相加，标单一符号会误导）
         result.CurrencySymbol = symbols.Count == 1 ? symbols.First() : "";
         return result;
+    }
+
+    /// <summary>把一站的窗口统计并入目标（各字段相加——窗口口径下跨站直接累加）。</summary>
+    /// <param name="target">目标窗口。</param>
+    /// <param name="one">该站窗口。</param>
+    /// <returns>并入后的目标窗口。</returns>
+    private static WindowStat Add(WindowStat target, WindowStat one)
+    {
+        target.Count += one.Count;
+        target.PromptTokens += one.PromptTokens;
+        target.CompletionTokens += one.CompletionTokens;
+        target.CacheTokens += one.CacheTokens;
+        target.RequestIdCount += one.RequestIdCount;
+        return target;
     }
 
     /// <summary>把一站的聚合行并入目标表（同名相加，额度按该站换算比折算成金额）。</summary>

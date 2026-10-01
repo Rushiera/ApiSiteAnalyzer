@@ -567,6 +567,15 @@ function renderCards(o, sym){
     [win + '平均首字', Math.round(o.recentAvgFirstTokenMs) + ' ms', null, deltaLine(o.recentAvgFirstTokenMs, o.prevAvgFirstTokenMs, pc, true, Math.round(o.prevAvgFirstTokenMs) + ' ms')],
     [win + '平均耗时', fmtNum(Math.round(o.recentAvgUseTime*1000)) + ' ms', null, deltaLine(o.recentAvgUseTime, o.prevAvgUseTime, pc, true, fmtNum(Math.round(o.prevAvgUseTime*1000)) + ' ms')],
     [win + '平均速率', o.recentAvgSpeedTps.toFixed(1) + ' t/s', null, deltaLine(o.recentAvgSpeedTps, o.prevAvgSpeedTps, pc, false, o.prevAvgSpeedTps.toFixed(1) + ' t/s')],
+    /* 24 小时窗口四项——紧随「近十次平均速率」右侧；每项下方对比行给「前 24 小时 数值 + 正负百分比」 */
+    ['近 24 小时输入 Token', fmtNum(o.last24h.promptTokens), null,
+      delta24Line(o.last24h.promptTokens, o.prev24h.promptTokens, o.prev24h.count, fmtNum(o.prev24h.promptTokens), 'flat')],
+    ['近 24 小时输出 Token', fmtNum(o.last24h.completionTokens), null,
+      delta24Line(o.last24h.completionTokens, o.prev24h.completionTokens, o.prev24h.count, fmtNum(o.prev24h.completionTokens), 'flat')],
+    ['近 24 小时缓存命中率', (o.last24h.cacheHitRate*100).toFixed(1) + '%', null,
+      delta24Line(o.last24h.cacheHitRate, o.prev24h.cacheHitRate, o.prev24h.count, (o.prev24h.cacheHitRate*100).toFixed(1) + '%', 'up')],
+    ['近 24 小时已探明请求 ID', fmtNum(o.last24h.requestIdCount), null,
+      delta24Line(o.last24h.requestIdCount, o.prev24h.requestIdCount, o.prev24h.count, fmtNum(o.prev24h.requestIdCount), 'flat')],
   ];
   $('cards').innerHTML = items.map(it =>
     '<div class="card' + (it[2] ? ' clickable' : '') + '"' + (it[2] ? ' data-key="' + it[2] + '"' : '') +
@@ -593,6 +602,21 @@ function deltaLine(cur, prev, prevCount, lowerBetter, prevText){
     cls = better ? ' good' : ' bad';
   }
   return '<div class="deltaline' + cls + '"><span>前 10 次 ' + prevText + '</span><span>' + (pct > 0 ? '+' : '') + pct.toFixed(1) + '%</span></div>';
+}
+
+/* 24 小时卡片对比行（近 24 小时 vs 前 24 小时）：左「前 24 小时 + 具体数值」、右百分比——
+   mode：'up' 越大越好 / 'down' 越小越好 / 'flat' 中性（token 量级与请求数不判好坏，只给变化幅度）；
+   前窗无记录或分母为 0 时如实说明（不静默省略，也不假报百分比） */
+function delta24Line(cur, prev, prevCount, prevText, mode){
+  if(prevCount < 1) return '<div class="deltaline">前 24 小时 无记录</div>';
+  if(!(prev > 0)) return '<div class="deltaline">前 24 小时 无有效样本</div>';
+  const pct = Math.round((cur - prev) / prev * 1000) / 10;
+  let cls = '';
+  if(pct !== 0 && mode !== 'flat'){
+    const better = mode === 'down' ? pct < 0 : pct > 0;
+    cls = better ? ' good' : ' bad';
+  }
+  return '<div class="deltaline' + cls + '"><span>前 24 小时 ' + prevText + '</span><span>' + (pct > 0 ? '+' : '') + pct.toFixed(1) + '%</span></div>';
 }
 
 function renderRecent(rows, sym){

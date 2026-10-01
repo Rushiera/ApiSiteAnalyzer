@@ -94,6 +94,25 @@ public sealed class AggregateRow
     public long Token { get; set; }
 }
 
+/// <summary>时间窗口统计（近 24 小时 / 前 24 小时）——卡片四项的窗口口径。</summary>
+public sealed class WindowStat
+{
+    /// <summary>窗口内记录条数。</summary>
+    public long Count { get; set; }
+
+    /// <summary>窗口内输入 token 合计。</summary>
+    public long PromptTokens { get; set; }
+
+    /// <summary>窗口内输出 token 合计。</summary>
+    public long CompletionTokens { get; set; }
+
+    /// <summary>窗口内缓存 token 合计。</summary>
+    public long CacheTokens { get; set; }
+
+    /// <summary>窗口内已探明请求 ID 数（去重计数）。</summary>
+    public long RequestIdCount { get; set; }
+}
+
 /// <summary>总览统计。</summary>
 public sealed class OverviewStat
 {
@@ -138,6 +157,12 @@ public sealed class OverviewStat
 
     /// <summary>再往前十次窗口（第 11–20 次）的平均输出速率（token/秒）。</summary>
     public double PrevAvgSpeedTps { get; set; }
+
+    /// <summary>近 24 小时窗口统计（按记录时刻切）。</summary>
+    public WindowStat Last24h { get; set; } = new WindowStat();
+
+    /// <summary>前 24 小时窗口统计（24–48 小时前）——四项对比行的参照窗口。</summary>
+    public WindowStat Prev24h { get; set; } = new WindowStat();
 }
 
 /// <summary>库内一条已探明请求 ID（去重后）及其出现时刻。</summary>
@@ -571,6 +596,43 @@ ON CONFLICT (site_id) DO UPDATE SET fetched_at=excluded.fetched_at, total_count=
                 stat.PrevAvgUseTime = reader.GetDouble(6);
                 stat.PrevAvgSpeedTps = reader.GetDouble(7);
             }
+        }
+
+        // [段3] 24 小时窗口——近 24 小时与前 24 小时（两窗相邻不重叠；边界取同一时刻，避免两次取时钟导致窗口错位）
+        long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        stat.Last24h = WindowQuery(siteId, types, now - 86400, now);
+        stat.Prev24h = WindowQuery(siteId, types, now - 172800, now - 86400);
+
+        return stat;
+    }
+    /// <summary>按记录时刻的窗口统计（[from, to) 半开区间）——条数 / 三种 token / 去重请求 ID。</summary>
+    /// <param name="siteId">站点键。</param>
+    /// <param name="types">记录类型白名单（空 = 全部）。</param>
+    /// <param name="from">窗口起点（Unix 秒，含）。</param>
+    /// <param name="to">窗口终点（Unix 秒，不含）。</param>
+    /// <returns>窗口统计。</returns>
+    private WindowStat WindowQuery(string siteId, IReadOnlyList<int> types, long from, long to)
+    {
+        var stat = new WindowStat();
+
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = @"
+        SELECT COUNT(*), COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0),
+               COALESCE(SUM(cache_tokens),0),
+               COUNT(DISTINCT CASE WHEN request_id <> '' THEN request_id END)
+        FROM usage_log WHERE site_id=$site AND created_at >= $from AND created_at < $to" + BuildTypeFilter(cmd, types) + ";";
+        cmd.Parameters.AddWithValue("$site", siteId);
+        cmd.Parameters.AddWithValue("$from", from);
+        cmd.Parameters.AddWithValue("$to", to);
+
+        using SqliteDataReader reader = cmd.ExecuteReader();
+        if (reader.Read())
+        {
+            stat.Count = reader.GetInt64(0);
+            stat.PromptTokens = reader.GetInt64(1);
+            stat.CompletionTokens = reader.GetInt64(2);
+            stat.CacheTokens = reader.GetInt64(3);
+            stat.RequestIdCount = reader.GetInt64(4);
         }
 
         return stat;

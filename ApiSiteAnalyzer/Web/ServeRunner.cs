@@ -533,6 +533,8 @@ public static class ServeRunner
                     prevAvgFirstTokenMs = overview.PrevAvgFirstTokenMs,
                     prevAvgUseTime = overview.PrevAvgUseTime,
                     prevAvgSpeedTps = overview.PrevAvgSpeedTps,
+                    last24h = MapWindow(overview.Last24h),
+                    prev24h = MapWindow(overview.Prev24h),
                 },
                 byModel = byModel.Select(r => Map(r, unit)),
                 byDay = byDay.Select(r => Map(r, unit)),
@@ -809,6 +811,8 @@ public static class ServeRunner
                 prevAvgFirstTokenMs = all.PrevAvgFirstTokenMs,
                 prevAvgUseTime = all.PrevAvgUseTime,
                 prevAvgSpeedTps = all.PrevAvgSpeedTps,
+                last24h = MapWindow(all.Last24h),
+                prev24h = MapWindow(all.Prev24h),
             },
             byModel = all.ByModel.Select(MapMerged),
             byDay = all.ByDay.Select(MapMerged),
@@ -851,6 +855,22 @@ public static class ServeRunner
             quotaPerUnit = block.QuotaPerUnit,
             currencySymbol = block.CurrencySymbol,
             lastFetchAt = block.LastFetchAt,
+        };
+    }
+
+    /// <summary>把时间窗口统计映射成前端结构（命中率由输入 / 缓存现算——口径只在服务端定一次）。</summary>
+    /// <param name="window">窗口统计。</param>
+    /// <returns>前端结构。</returns>
+    private static object MapWindow(WindowStat window)
+    {
+        return new
+        {
+            count = window.Count,
+            promptTokens = window.PromptTokens,
+            completionTokens = window.CompletionTokens,
+            cacheTokens = window.CacheTokens,
+            cacheHitRate = window.PromptTokens > 0 ? (double)window.CacheTokens / window.PromptTokens : 0,
+            requestIdCount = window.RequestIdCount,
         };
     }
 
