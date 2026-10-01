@@ -45,6 +45,7 @@ public static class ServeRunner
         var dbPath = Path.Combine(dataDir, "usage.db");
         var state = new PanelState(sites, dbPath);
         var settings = new PanelSettings(Path.Combine(dataDir, "settings.json"));
+        var keys = new KeyStore(Path.Combine(dataDir, "keys.json"));
         var collector = new AutoCollector(session, sites, dbPath, state, settings);
 
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
@@ -68,11 +69,16 @@ public static class ServeRunner
             foreach (IApiSite site in sites)
             {
                 SiteSnapshot? snapshot = db.ReadSnapshot(site.Id);
+
+                // [段2a] 通道自证——有 key 即走 API key 直连（特批站点）；key 明文回传供面板顶部编辑
+                string apiKey = site is NewApiSite direct ? direct.ApiKey : "";
                 list.Add(new
                 {
                     id = site.Id,
                     displayName = site.DisplayName,
                     baseUrl = site.BaseUrl,
+                    channel = apiKey.Length > 0 ? "apikey" : "browser",
+                    apiKey = apiKey,
                     loginUrl = site.LoginUrl,
                     profileDir = site.ProfileDir,
                     quotaPerUnit = site.QuotaPerUnit,
@@ -208,6 +214,51 @@ public static class ServeRunner
             catch (Exception ex)
             {
                 return Results.Json(new { ok = false, error = ex.Message });
+            }
+        });
+
+        // [段4b] 保存 API key（**特批**——仅 47.250.160.225:8443 一站）——落 data/keys.json，立即生效并回执探活结果
+        app.MapPost("/api/save-key", async (HttpContext context) =>
+        {
+            string siteId = await ReadFieldAsync(context, "site");
+            string key = (await ReadFieldAsync(context, "key")).Trim();
+            IApiSite? site = FindSite(sites, siteId);
+            if (site is null)
+            {
+                return Results.Json(new { ok = false, error = "未知站点：" + siteId });
+            }
+
+            if (site is not NewApiSite direct)
+            {
+                return Results.Json(new { ok = false, error = "该站点走浏览器登录通道，不接受 API key" });
+            }
+
+            if (key.Length == 0)
+            {
+                return Results.Json(new { ok = false, error = "API key 不能为空" });
+            }
+
+            direct.ApiKey = key;
+            keys.Set(siteId, key);
+
+            try
+            {
+                LoginState probe = await queue.RunAsync(() => session.ProbeLoginAsync(direct, CancellationToken.None)).ConfigureAwait(false);
+                return Results.Json(new
+                {
+                    ok = true,
+                    saved = true,
+                    probeOk = probe.LoggedIn,
+                    username = probe.Username,
+                    requestCount = probe.RequestCount,
+                    message = probe.LoggedIn
+                        ? "已保存并生效——key 有效，本次可见 " + probe.RequestCount + " 条记录"
+                        : "已保存，但探活失败：" + probe.Message,
+                });
+            }
+            catch (Exception ex)
+            {
+                return Results.Json(new { ok = true, saved = true, probeOk = false, message = "已保存，但探活异常：" + ex.Message });
             }
         });
 

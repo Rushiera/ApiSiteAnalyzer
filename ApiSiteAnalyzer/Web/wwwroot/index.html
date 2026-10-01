@@ -25,6 +25,17 @@
   .status.ok{color:var(--ok);border-color:#204a35}
   .status.bad{color:var(--bad);border-color:#5a2a26}
 
+  /* API key 条（**特批**——仅 47.250.160.225:8443 一站）：明文展示 + 就地编辑 + 保存即生效 */
+  .keybar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:12px 0 0;padding:9px 12px;
+    border-radius:6px;background:#161c26;border:1px solid #2b3648}
+  .keybar .kblabel{color:var(--accent);font-size:12px;font-weight:600;letter-spacing:.06em}
+  .keybar input[type=text]{flex:1;min-width:260px;background:#0e1219;color:var(--text);border:1px solid var(--line);
+    border-radius:6px;padding:6px 10px;font-family:Consolas,"Courier New",monospace;font-size:12px}
+  .keybar input[type=text]:focus{outline:none;border-color:var(--accent)}
+  .keybar .kbn{color:var(--dim);font-size:12px}
+  .keybar .kbn.ok{color:var(--ok)}
+  .keybar .kbn.bad{color:var(--bad)}
+
   /* 真实余额条 */
   .balance{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;margin:14px 0 6px;padding:14px 18px;
     border-radius:10px;border:1px solid #3b3222;background:linear-gradient(90deg,#1c1a14,#161a21)}
@@ -114,6 +125,14 @@
     <button id="btnLogin">去登录</button>
     <button id="btnFetch" class="primary" title="单击＝按当前设置拉取　双击＝打开设置">拉取数据</button>
   </header>
+
+  <!-- API key 条（**特批**——仅 47.250.160.225:8443 一站）：明文展示、就地编辑、保存即生效 -->
+  <div class="keybar" id="keybar" style="display:none">
+    <span class="kblabel">API Key</span>
+    <input type="text" id="apiKeyInput" spellcheck="false" autocomplete="off" placeholder="sk-..." />
+    <button id="btnSaveKey" class="primary">保存</button>
+    <span class="kbn" id="keyHint"></span>
+  </div>
 
   <div class="mask" id="mask">
     <div class="dialog">
@@ -247,7 +266,7 @@ function setStatus(text, kind){
   el.className = 'status' + (kind ? ' ' + kind : '');
 }
 
-async function loadSites(){
+async function loadSites(keep){
   const r = await fetch('/api/sites').then(x=>x.json());
   if(!r.ok){ setStatus('站点清单读取失败', 'bad'); return; }
   const ver = $('version');
@@ -269,8 +288,12 @@ async function loadSites(){
     o.textContent = s.displayName + '（' + s.rows + ' 行）';
     sel.appendChild(o);
   });
-  if(r.sites.length){ currentSite = r.sites[0].id; }
-  sel.onchange = () => { currentSite = sel.value; loadAnalysis(); };
+  if(keep && siteMap[keep]){ currentSite = keep; }
+  else if(r.sites.length){ currentSite = r.sites[0].id; }
+  sel.value = currentSite;
+  sel.onchange = () => { currentSite = sel.value; switchSite(); };
+  renderKeyBar();
+  renderBalance(null);
   renderOfficial();
 }
 
@@ -278,7 +301,9 @@ function renderOfficial(){
   const s = siteMap[currentSite];
   const el = $('officialRow');
   if(!s || !s.snapshot){
-    el.innerHTML = '<div class="cell"><div class="k">—</div><div class="v muted">未取到（点「拉取数据」会顺带拉一次）</div></div>';
+    const direct = !!(s && s.channel === 'apikey');
+    el.innerHTML = '<div class="cell"><div class="k">—</div><div class="v muted">' +
+      (direct ? '该站无口径接口（API key 只能查用量日志）' : '未取到（点「拉取数据」会顺带拉一次）') + '</div></div>';
     $('officialStamp').textContent = '';
     return;
   }
@@ -296,10 +321,59 @@ function renderOfficial(){
   $('officialStamp').textContent = '抓取于 ' + sn.fetchedAt + ' · 口径 = 站点 /api/data/self（近 24 小时窗口）';
 }
 
+/* 站点切换——**重渲染**，不留脏数据：
+   重拉 /api/sites（行数 / 快照 / key 一律取最新）+ 重建下拉（保留选中）+ 重拉分析面，
+   面板上所有属于站点的东西一次性换到新站点；明细弹窗就地关掉（那属于上一个站）。 */
+async function switchSite(){
+  closeRequestIds();
+  await loadSites(currentSite);
+  const s = siteMap[currentSite];
+  setStatus(s ? ('已切到「' + s.displayName + '」——点「检查登录」或「拉取数据」取数') : '未选择站点', '');
+  loadAnalysis();
+}
+
+/* API key 条（**特批**——仅该站）：切到直连通道的站点才显示；明文回显，改完点保存即生效 */
+function renderKeyBar(){
+  const s = siteMap[currentSite];
+  const bar = $('keybar');
+  if(!s || s.channel !== 'apikey'){ bar.style.display = 'none'; return; }
+  bar.style.display = 'flex';
+  $('apiKeyInput').value = s.apiKey || '';
+  $('keyHint').className = 'kbn';
+  $('keyHint').textContent = '该站无账号密码——全部功能仅认这一个 key；明文存本地 data/keys.json（不入仓）';
+}
+
+async function saveKey(){
+  if(!currentSite) return;
+  const key = $('apiKeyInput').value.trim();
+  const hint = $('keyHint');
+  if(!key){ hint.className = 'kbn bad'; hint.textContent = 'API key 不能为空'; return; }
+  hint.className = 'kbn'; hint.textContent = '保存中…';
+  const r = await fetch('/api/save-key', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({site: currentSite, key: key})
+  }).then(x=>x.json());
+  if(!r.ok){ hint.className = 'kbn bad'; hint.textContent = '保存失败：' + (r.error||''); return; }
+  const s = siteMap[currentSite];
+  if(s){ s.apiKey = key; }
+  hint.className = 'kbn ' + (r.probeOk ? 'ok' : 'bad');
+  hint.textContent = r.message || '已保存';
+}
+
 function renderBalance(balance){
   const s = siteMap[currentSite];
   if(!s){ $('balanceMain').textContent = '—'; return; }
-  if(!balance && balance !== 0){ $('balanceMain').textContent = '—'; $('balanceSide').textContent = '点「检查登录」取真实余额'; return; }
+  /* 直连站点没有余额接口——不论传进来什么一律显示「无此接口」（切站点后不会残留上一个站的数字） */
+  if(s.channel === 'apikey'){
+    $('balanceMain').textContent = '—';
+    $('balanceSide').textContent = '该站无余额接口（API key 只能查用量日志）';
+    return;
+  }
+  if(!balance && balance !== 0){
+    $('balanceMain').textContent = '—';
+    $('balanceSide').textContent = '点「检查登录」取真实余额';
+    return;
+  }
   const sym = s.currencySymbol;
   $('balanceMain').textContent = fmtAmount8(balance / s.quotaPerUnit, sym);
   $('balanceSide').innerHTML = '原始 <b>' + fmtNum(balance) + '</b> quota · 换算 <b>1 ' + esc(sym) + ' = ' + fmtNum(s.quotaPerUnit) + ' quota</b>';
@@ -370,8 +444,11 @@ function renderRecent(rows, sym){
 
 async function loadAnalysis(){
   if(!currentSite) return;
+  const asked = currentSite;
   const range = $('range').value;
-  const r = await fetch('/api/analysis?site=' + encodeURIComponent(currentSite) + '&range=' + range).then(x=>x.json());
+  const r = await fetch('/api/analysis?site=' + encodeURIComponent(asked) + '&range=' + range).then(x=>x.json());
+  /* 期间切了站点——丢弃过期响应，不让上一个站的数据落在新站的画面上 */
+  if(asked !== currentSite) return;
   if(!r.ok){ setStatus('分析数据读取失败：' + (r.error||''), 'bad'); return; }
   const sym = r.site.currencySymbol;
   renderCards(r.overview, sym);
@@ -385,18 +462,26 @@ async function loadAnalysis(){
 
 async function checkLogin(){
   if(!currentSite) return;
+  const asked = currentSite;
   setStatus('正在检查登录态…');
   const r = await fetch('/api/login-check', {
     method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({site: currentSite})
+    body: JSON.stringify({site: asked})
   }).then(x=>x.json());
+  if(asked !== currentSite) return;
   if(!r.ok){ setStatus('检查失败：' + (r.error||''), 'bad'); return; }
+  const s = siteMap[currentSite];
+  const direct = !!(s && s.channel === 'apikey');
   if(r.loggedIn){
     renderBalance(r.quota);
-    setStatus('已登录 · 用户 ' + r.username + ' · 请求数 ' + fmtNum(r.requestCount), 'ok');
+    setStatus(direct
+      ? 'API key 有效 · 账号 ' + r.username + ' · 本次可见 ' + fmtNum(r.requestCount) + ' 条记录'
+      : '已登录 · 用户 ' + r.username + ' · 请求数 ' + fmtNum(r.requestCount), 'ok');
   }else{
     renderBalance(null);
-    setStatus((r.message || '未登录') + ' —— 点右上角「去登录」', 'bad');
+    setStatus(direct
+      ? (r.message || 'API key 无效') + ' —— 在顶部 key 框里改好后点「保存」'
+      : (r.message || '未登录') + ' —— 点右上角「去登录」', 'bad');
   }
 }
 
@@ -530,6 +615,7 @@ function closeSettings(){ $('mask').className = 'mask'; }
 
 $('btnCheck').onclick = checkLogin;
 $('btnLogin').onclick = openLogin;
+$('btnSaveKey').onclick = saveKey;
 
 /* 单击＝按当前设置拉取；双击＝打开设置弹窗（两击 320ms 内算双击） */
 let clickTimer = null;

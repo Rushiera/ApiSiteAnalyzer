@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -49,6 +50,8 @@ public sealed class SiteSession
 
     /// <summary>受控浏览器中心。</summary>
     private readonly BrowserHub _hub;
+    /// <summary>直连通道的 HTTP 客户端（API key 站点专用——不启浏览器）。</summary>
+    private static readonly HttpClient DirectHttp = new HttpClient { Timeout = TimeSpan.FromSeconds(60) };
 
     /// <summary>构造站点会话。</summary>
     /// <param name="hub">受控浏览器中心。</param>
@@ -65,6 +68,12 @@ public sealed class SiteSession
     /// <returns>登录态结果。</returns>
     public async Task<LoginState> ProbeLoginAsync(IApiSite site, CancellationToken ct)
     {
+        // [段0] API key 直连站点（特批）——不经浏览器，直接用 key 调取数接口探活
+        if (site is NewApiSite direct && direct.ApiKey.Length > 0)
+        {
+            return await ProbeDirectAsync(direct, ct).ConfigureAwait(false);
+        }
+
         CdpSession session;
 
         try
@@ -136,6 +145,12 @@ public sealed class SiteSession
         Action<string> progress,
         CancellationToken ct)
     {
+        // [段0] API key 直连站点（特批）——一次请求拿全量，不经浏览器
+        if (site is NewApiSite direct && direct.ApiKey.Length > 0)
+        {
+            return await FetchDirectAsync(direct, options, onPage, progress, ct).ConfigureAwait(false);
+        }
+
         var summary = new FetchSummary();
         int confirmStreak = options.ConfirmStreak > 0 ? options.ConfirmStreak : 20;
 
@@ -269,6 +284,12 @@ public sealed class SiteSession
     /// <returns>受控实例（供面板回显端口）。</returns>
     public async Task<BrowserInstance> OpenLoginAsync(IApiSite site, CancellationToken ct)
     {
+        // [段0] API key 直连站点（特批）——没有浏览器登录这回事，出声拒绝（不静默什么都不做）
+        if (site is NewApiSite direct && direct.ApiKey.Length > 0)
+        {
+            throw new InvalidOperationException("该站点走 API key 直连通道，不需要浏览器登录");
+        }
+
         (BrowserInstance instance, _) = await _hub.EnsureAsync(site.ProfileDir, site.BaseUrl, ct).ConfigureAwait(false);
 
         CdpSession session = await OpenSessionAsync(site, ct).ConfigureAwait(false);
@@ -475,6 +496,115 @@ public sealed class SiteSession
         }
 
         return text.Substring(0, limit) + "…";
+    }
+    /// <summary>
+    /// 直连取数——用 API key 调站点取数接口，返回原始响应体（**特批通道**，不经浏览器）。
+    /// 失败一律出声（HTTP 码 + 响应片段），不静默返回空表。
+    /// </summary>
+    /// <param name="site">站点适配器（ApiKey 非空）。</param>
+    /// <param name="ct">取消令牌。</param>
+    /// <returns>原始 JSON 响应体。</returns>
+    private static async Task<string> GetDirectAsync(NewApiSite site, CancellationToken ct)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, site.BuildUsageUrl());
+        request.Headers.Add("Authorization", "Bearer " + site.ApiKey);
+
+        using HttpResponseMessage response = await DirectHttp.SendAsync(request, ct).ConfigureAwait(false);
+        string body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            string hint = (int)response.StatusCode == 429 ? "（站点限流——短时密集请求会触发，稍后再试）" : "";
+            throw new InvalidOperationException("取数接口返回 HTTP " + (int)response.StatusCode + hint + "：" + Truncate(body, 200));
+        }
+
+        return body;
+    }
+    /// <summary>
+    /// 直连探活——用 API key 调一次取数接口，能拿到记录即视为凭据有效（**特批通道**）。
+    /// 该站点没有用户信息接口可用（`/api/user/self` 对 key 返回 401），真实余额与站点口径都拿不到——
+    /// 故只回「凭据有效 / 无效」+ 账号名 + 本次可见记录数。
+    /// </summary>
+    /// <param name="site">站点适配器（ApiKey 非空）。</param>
+    /// <param name="ct">取消令牌。</param>
+    /// <returns>登录态结果（LoggedIn = 凭据可用）。</returns>
+    private static async Task<LoginState> ProbeDirectAsync(NewApiSite site, CancellationToken ct)
+    {
+        try
+        {
+            string body = await GetDirectAsync(site, ct).ConfigureAwait(false);
+            UsagePage page = site.ParseUsagePage(body);
+
+            var state = new LoginState { LoggedIn = true, RequestCount = page.Records.Count, Message = "API key 有效" };
+            if (page.Records.Count > 0)
+            {
+                using JsonDocument doc = JsonDocument.Parse(page.Records[0]);
+                JsonElement root = doc.RootElement;
+                if (root.TryGetProperty("username", out JsonElement user) && user.ValueKind == JsonValueKind.String)
+                {
+                    state.Username = user.GetString() ?? "";
+                }
+            }
+
+            return state;
+        }
+        catch (Exception ex)
+        {
+            return new LoginState { LoggedIn = false, Message = "API key 直连失败：" + ex.Message };
+        }
+    }
+    /// <summary>
+    /// 直连拉取——一次请求拿全量（**特批通道**）。该站点的取数接口忽略分页参数、固定返回全量，
+    /// 故没有分页循环、也没有「追平提前停止」（追平省的是请求数，这里请求数恒为 1）。
+    /// 落库仍走同一份 `PageWriter`——落库口径唯一实现，不因通道不同而分叉。
+    /// </summary>
+    /// <param name="site">站点适配器（ApiKey 非空）。</param>
+    /// <param name="options">拉取选项（直连通道不适用——一次请求即全量，保留形参以对齐调用方）。</param>
+    /// <param name="onPage">单页回调（页码固定 1）。</param>
+    /// <param name="progress">进度提示回调（文本）。</param>
+    /// <param name="ct">取消令牌。</param>
+    /// <returns>拉取汇总。</returns>
+    private static async Task<FetchSummary> FetchDirectAsync(
+        NewApiSite site,
+        FetchOptions options,
+        Func<int, UsagePage, PageOutcome> onPage,
+        Action<string> progress,
+        CancellationToken ct)
+    {
+        var summary = new FetchSummary();
+
+        try
+        {
+            progress("直连取数中（API key）…");
+            string body = await GetDirectAsync(site, ct).ConfigureAwait(false);
+            UsagePage page = site.ParseUsagePage(body);
+
+            summary.Pages = 1;
+            summary.Total = page.Total;
+            summary.Fetched = page.Records.Count;
+
+            if (page.Records.Count > 0)
+            {
+                PageOutcome outcome = onPage(1, page);
+                summary.Added = outcome.NewCount;
+                summary.Matched = outcome.MatchedCount;
+
+                if (outcome.Stop)
+                {
+                    summary.Error = "入库回调中止";
+                    return summary;
+                }
+            }
+
+            progress("直连取数完成：" + page.Records.Count + " 条 · 新增 " + summary.Added + " · 一致 " + summary.Matched);
+            summary.Ok = true;
+            return summary;
+        }
+        catch (Exception ex)
+        {
+            summary.Error = ex.Message;
+            return summary;
+        }
     }
 }
 

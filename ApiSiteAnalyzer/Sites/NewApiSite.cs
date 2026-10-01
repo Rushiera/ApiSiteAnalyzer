@@ -70,6 +70,8 @@ public sealed class NewApiSite : IApiSite
 
     /// <summary>货币符号。</summary>
     public string CurrencySymbol => _currencySymbol;
+    /// <summary>API key 直连凭据——**特批**（2026-10-01 · Rushiera 单笔授权 · 仅此一次 · 仅限本站）。空 = 走浏览器通道（默认，凭据不出浏览器）；非空 = 走 API key 直连。理由：该网站没有用户名与密码设置、API key 不二次提供、全部功能仅认这一个唯一 id——没有「登录归人」的路径可走。key 落 data/keys.json（不入仓），由面板顶部明文编辑。</summary>
+    public string ApiKey { get; set; } = "";
 
     /// <summary>
     /// 登录态探针——在页面上下文内取 access_token，再读账户信息（含**真实余额** quota）。
@@ -308,25 +310,44 @@ public sealed class NewApiSite : IApiSite
             throw new InvalidOperationException("用量接口返回 success=false：" + Truncate(rawBody, 300));
         }
 
-        if (!root.TryGetProperty("data", out JsonElement data) || data.ValueKind != JsonValueKind.Object)
+        if (!root.TryGetProperty("data", out JsonElement data))
         {
             throw new InvalidOperationException("用量接口返回结构异常（缺 data）");
         }
 
-        if (data.TryGetProperty("total", out JsonElement total) && total.ValueKind == JsonValueKind.Number && total.TryGetInt32(out int totalCount))
+        // [段1] data 是对象——/api/log/self 形态（items + total；浏览器通道，贤鱼 API）
+        if (data.ValueKind == JsonValueKind.Object)
         {
-            page.Total = totalCount;
+            if (data.TryGetProperty("total", out JsonElement total) && total.ValueKind == JsonValueKind.Number && total.TryGetInt32(out int totalCount))
+            {
+                page.Total = totalCount;
+            }
+
+            if (data.TryGetProperty("items", out JsonElement items) && items.ValueKind == JsonValueKind.Array)
+            {
+                foreach (JsonElement item in items.EnumerateArray())
+                {
+                    page.Records.Add(item.GetRawText());
+                }
+            }
+
+            return page;
         }
 
-        if (data.TryGetProperty("items", out JsonElement items) && items.ValueKind == JsonValueKind.Array)
+        // [段2] data 是数组——/api/log/token 形态（API key 直连；特批站点 47.250.160.225:8443）
+        //       实测无 total 字段、忽略分页参数：整批即全量，条数按本批计
+        if (data.ValueKind == JsonValueKind.Array)
         {
-            foreach (JsonElement item in items.EnumerateArray())
+            foreach (JsonElement item in data.EnumerateArray())
             {
                 page.Records.Add(item.GetRawText());
             }
+
+            page.Total = page.Records.Count;
+            return page;
         }
 
-        return page;
+        throw new InvalidOperationException("用量接口返回结构异常（data 既不是对象也不是数组）");
     }
 
     /// <summary>解析一条记录——主字段 + other 内嵌字段（缓存 token / 首字延迟 / 上游模型）。</summary>
@@ -442,5 +463,16 @@ public sealed class NewApiSite : IApiSite
         }
 
         return text.Substring(0, limit) + "…";
+    }
+    /// <summary>
+    /// 直连取数地址——API key 通道专用（**特批站点**，2026-10-01）。
+    /// 该站点的取数端点是 `/api/log/token`（token 认证，不是用户 access_token）；
+    /// 实测（2026-10-01）：忽略 p / page / page_size / size / limit / type / 时间区间等全部参数，
+    /// 固定返回该 token 的全量记录（262 条 / 约 200KB / 响应无 total 字段 / 短时密集请求触发 429）。
+    /// </summary>
+    /// <returns>完整取数 URL。</returns>
+    public string BuildUsageUrl()
+    {
+        return _baseUrl + "/api/log/token";
     }
 }

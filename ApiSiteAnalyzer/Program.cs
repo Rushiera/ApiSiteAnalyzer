@@ -105,6 +105,8 @@ public static class Program
     /// <summary>把配置转成站点适配器清单。</summary>
     private static List<IApiSite> BuildSites(AppConfig config, string dataDir)
     {
+        // [段1] API key 存储（特批站点用）——落 data/keys.json，不入仓
+        var keys = new KeyStore(Path.Combine(dataDir, "keys.json"));
         var sites = new List<IApiSite>();
 
         foreach (SiteConfig item in config.Sites)
@@ -113,7 +115,11 @@ public static class Program
                 ? item.ProfileDir
                 : Path.Combine(dataDir, "profiles", item.Id);
 
-            sites.Add(new NewApiSite(item.Id, item.DisplayName, item.BaseUrl, profileDir, item.QuotaPerUnit, item.CurrencySymbol));
+            var site = new NewApiSite(item.Id, item.DisplayName, item.BaseUrl, profileDir, item.QuotaPerUnit, item.CurrencySymbol);
+
+            // [段2] 有 key 即走 API key 直连通道（特批——仅该站）；没有 key 仍走浏览器通道
+            site.ApiKey = keys.Get(item.Id);
+            sites.Add(site);
         }
 
         return sites;
