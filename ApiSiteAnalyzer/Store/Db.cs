@@ -538,6 +538,124 @@ FROM usage_log WHERE site_id=$site" + BuildTypeFilter(cmd, types) + ";";
         return GroupBy(siteId, "group_name", types, limit);
     }
 
+    /// <summary>
+    /// 批量比对库内既有行——增量拉取用：站点列表「新的在前」，连续读到与库内完全一致的记录即说明已追平历史。
+    /// 一次查询比对整页（不逐条往返）。
+    /// </summary>
+    /// <param name="records">待比对记录（一次一页）。</param>
+    /// <returns>逐条标记（true = 库内已有且字段完全一致）。</returns>
+    public List<bool> MatchExisting(IReadOnlyList<UsageRecord> records)
+    {
+        var flags = new List<bool>();
+        if (records.Count == 0)
+        {
+            return flags;
+        }
+
+        // [段1] 预取本批全部主键的库内行
+        var existing = new Dictionary<string, UsageRecord>(StringComparer.Ordinal);
+        using (var cmd = _conn.CreateCommand())
+        {
+            var names = new List<string>();
+            for (int i = 0; i < records.Count; i++)
+            {
+                string name = "$k" + i;
+                names.Add(name);
+                cmd.Parameters.AddWithValue(name, records[i].LogKey);
+            }
+
+            cmd.CommandText = "SELECT site_id, log_key, remote_id, created_at, type, model_name, token_name, group_name, " +
+                "quota, prompt_tokens, completion_tokens, cache_tokens, use_time, first_token_ms, speed_tps, is_stream, " +
+                "channel, upstream_model, request_id, content FROM usage_log " +
+                "WHERE site_id=$site AND log_key IN (" + string.Join(",", names) + ");";
+            cmd.Parameters.AddWithValue("$site", records[0].SiteId);
+
+            using (SqliteDataReader reader = cmd.ExecuteReader())
+            {
+                while (reader.Read())
+                {
+                    UsageRecord row = ReadRecord(reader);
+                    existing[row.LogKey] = row;
+                }
+            }
+        }
+
+        // [段2] 逐条判定——库内没有、或字段有差异，都算「新」
+        foreach (UsageRecord record in records)
+        {
+            UsageRecord? known = null;
+            bool hit = existing.TryGetValue(record.LogKey, out known);
+            flags.Add(hit && known is not null && SameRow(record, known));
+        }
+
+        return flags;
+    }
+
+    /// <summary>按 MatchExisting 的查询列序读一行。</summary>
+    /// <param name="reader">已定位到数据行的读取器。</param>
+    /// <returns>库行。</returns>
+    private static UsageRecord ReadRecord(SqliteDataReader reader)
+    {
+        return new UsageRecord
+        {
+            SiteId = reader.GetString(0),
+            LogKey = reader.GetString(1),
+            RemoteId = reader.GetInt64(2),
+            CreatedAt = reader.GetInt64(3),
+            Type = reader.GetInt32(4),
+            ModelName = reader.GetString(5),
+            TokenName = reader.GetString(6),
+            GroupName = reader.GetString(7),
+            Quota = reader.GetInt64(8),
+            PromptTokens = reader.GetInt64(9),
+            CompletionTokens = reader.GetInt64(10),
+            CacheTokens = reader.GetInt64(11),
+            UseTime = reader.GetInt64(12),
+            FirstTokenMs = reader.GetInt64(13),
+            SpeedTps = reader.GetDouble(14),
+            IsStream = reader.GetInt64(15) != 0,
+            Channel = reader.GetInt64(16),
+            UpstreamModel = reader.GetString(17),
+            RequestId = reader.GetString(18),
+            Content = reader.GetString(19),
+        };
+    }
+
+    /// <summary>
+    /// 比对两条记录的业务字段是否完全一致。
+    /// **不比 remote_id**——站点展示序号每次查询从 1 重排，不承载语义（拿它判定会误报「有变化」）。
+    /// </summary>
+    /// <param name="left">新拉取记录。</param>
+    /// <param name="right">库内既有行。</param>
+    /// <returns>是否一致。</returns>
+    public static bool SameRow(UsageRecord left, UsageRecord right)
+    {
+        if (!string.Equals(left.SiteId, right.SiteId, StringComparison.Ordinal) ||
+            !string.Equals(left.LogKey, right.LogKey, StringComparison.Ordinal) ||
+            left.CreatedAt != right.CreatedAt ||
+            left.Type != right.Type ||
+            !string.Equals(left.ModelName, right.ModelName, StringComparison.Ordinal) ||
+            !string.Equals(left.TokenName, right.TokenName, StringComparison.Ordinal) ||
+            !string.Equals(left.GroupName, right.GroupName, StringComparison.Ordinal) ||
+            left.Quota != right.Quota ||
+            left.PromptTokens != right.PromptTokens ||
+            left.CompletionTokens != right.CompletionTokens ||
+            left.CacheTokens != right.CacheTokens ||
+            left.UseTime != right.UseTime ||
+            left.FirstTokenMs != right.FirstTokenMs ||
+            left.SpeedTps != right.SpeedTps ||
+            left.IsStream != right.IsStream ||
+            left.Channel != right.Channel ||
+            !string.Equals(left.UpstreamModel, right.UpstreamModel, StringComparison.Ordinal) ||
+            !string.Equals(left.RequestId, right.RequestId, StringComparison.Ordinal) ||
+            !string.Equals(left.Content, right.Content, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return true;
+    }
+
     /// <summary>按列名聚合。</summary>
     private List<AggregateRow> GroupBy(string siteId, string column, IReadOnlyList<int> types, int limit)
     {

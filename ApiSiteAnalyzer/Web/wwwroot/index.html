@@ -63,6 +63,22 @@
   .scroll{max-height:460px;overflow:auto}
   .muted{color:var(--dim)}
   .tag{display:inline-block;padding:1px 6px;border-radius:4px;background:#1e2632;color:var(--dim);font-size:11px}
+  .auto-on{color:var(--accent)}
+
+  /* 设置弹窗（双击「拉取数据」打开） */
+  .mask{position:fixed;inset:0;background:rgba(6,8,12,.66);display:none;align-items:center;justify-content:center;z-index:50}
+  .mask.show{display:flex}
+  .dialog{width:min(460px,92vw);background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 20px;
+    box-shadow:0 18px 50px rgba(0,0,0,.5)}
+  .dialog h3{margin:0 0 4px;font-size:15px}
+  .dialog .hint{color:var(--dim);font-size:12px;margin-bottom:14px}
+  .dialog .row{display:flex;align-items:center;gap:10px;margin:10px 0}
+  .dialog .row .k{width:56px;color:var(--dim);font-size:12px}
+  .dialog input[type=range]{flex:1;accent-color:var(--accent)}
+  .dialog input[type=checkbox]{width:16px;height:16px;accent-color:var(--accent)}
+  .dialog .val{width:56px;text-align:right;font-variant-numeric:tabular-nums;color:var(--accent);font-weight:600}
+  .dialog .actions{display:flex;gap:8px;align-items:center;margin-top:18px}
+  .dialog .actions .spacer{flex:1}
 </style>
 </head>
 <body>
@@ -76,10 +92,37 @@
     </select>
     <div class="spacer"></div>
     <span class="muted" id="version" title=""></span>
+    <span class="muted" id="autoState" title="双击「拉取数据」可改设置"></span>
     <button id="btnCheck">检查登录</button>
     <button id="btnLogin">去登录</button>
-    <button id="btnFetch" class="primary">拉取数据</button>
+    <button id="btnFetch" class="primary" title="单击＝按当前设置拉取　双击＝打开设置">拉取数据</button>
   </header>
+
+  <div class="mask" id="mask">
+    <div class="dialog">
+      <h3>采集设置</h3>
+      <div class="hint">双击「拉取数据」打开；设置存 <code>data/settings.json</code>，重启面板后仍生效。</div>
+      <div class="row">
+        <input type="checkbox" id="optAuto" checked />
+        <label for="optAuto">自动采集（按下方间隔定时拉取）</label>
+      </div>
+      <div class="row">
+        <span class="k">间隔</span>
+        <input type="range" id="optInterval" min="5" max="119" step="1" value="29" />
+        <span class="val" id="optIntervalVal">29 s</span>
+      </div>
+      <div class="row">
+        <input type="checkbox" id="optIncremental" checked />
+        <label for="optIncremental">增量拉取（连续 20 条与库内一致即停止，不重扫历史）</label>
+      </div>
+      <div class="actions">
+        <button id="btnFull">全量拉取一次</button>
+        <div class="spacer"></div>
+        <button id="btnCancel">取消</button>
+        <button id="btnSave" class="primary">保存并立即拉取</button>
+      </div>
+    </div>
+  </div>
 
   <div class="status" id="status">就绪</div>
 
@@ -148,7 +191,6 @@ const TYPE_NAME = {1:'充值',2:'消费',3:'管理',4:'系统',5:'错误',6:'退
 let currentSite = '';
 let timer = null;
 let siteMap = {};
-
 function fmtNum(n){ return (n===null||n===undefined)?'—':Number(n).toLocaleString('zh-CN'); }
 function fmtAmount(v, sym){ return (v===null||v===undefined)?'—':sym + Number(v).toFixed(4); }
 function fmtTokens(n){
@@ -178,6 +220,7 @@ async function loadSites(){
     ver.textContent = cur;
   }
   ver.title = (r.exePath || '') + (r.newestExe ? '　最新槽位：' + r.newestExe : '');
+  if(r.settings){ settings = r.settings; renderSettings(); }
   const sel = $('site');
   sel.innerHTML = '';
   siteMap = {};
@@ -320,21 +363,106 @@ async function openLogin(){
   setStatus(r.message + '（登录完成后点「检查登录」）', 'ok');
 }
 
-async function startFetch(){
+async function startFetch(full){
   if(!currentSite) return;
+  const body = {site: currentSite};
+  if(full) body.full = 'true';
   const r = await fetch('/api/fetch', {
     method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({site: currentSite})
+    body: JSON.stringify(body)
   }).then(x=>x.json());
   if(!r.ok){ setStatus('启动失败：' + (r.error||''), 'bad'); return; }
-  setStatus('采集中…');
+  setStatus((r.incremental === false ? '全量采集中…' : '增量采集中…'));
   poll();
 }
+
+/* ---------- 采集设置（双击「拉取数据」打开） ---------- */
+/* 计时归服务端（AutoCollector）——页面只负责显示与改设置：
+   若计时挂在页面上，关掉页面就悄悄不跑了（「设置说开着、实际没跑」= 静默失败） */
+let settings = { autoEnabled:true, autoIntervalSeconds:29, incremental:true, minIntervalSeconds:5, maxIntervalSeconds:119 };
+
+function renderSettings(){
+  $('optAuto').checked = settings.autoEnabled;
+  $('optInterval').min = settings.minIntervalSeconds;
+  $('optInterval').max = settings.maxIntervalSeconds;
+  $('optInterval').value = settings.autoIntervalSeconds;
+  $('optIntervalVal').textContent = settings.autoIntervalSeconds + ' s';
+  $('optIncremental').checked = settings.incremental;
+}
+
+/* 顶部自动采集指示——下一次到点时刻由服务端给（页面刷新也能看到同一个时刻） */
+function renderAutoState(p){
+  const el = $('autoState');
+  if(!p.autoEnabled){
+    el.className = 'muted';
+    el.textContent = '自动采集关';
+    return;
+  }
+  el.className = 'muted auto-on';
+  el.textContent = '自动采集 ' + p.autoIntervalSeconds + 's' + (p.autoNextAt ? '（下次 ' + p.autoNextAt.substring(11, 19) + '）' : '');
+}
+
+async function refreshAutoState(){
+  const p = await fetch('/api/progress').then(x=>x.json());
+  renderAutoState(p);
+}
+
+async function loadSettings(){
+  const r = await fetch('/api/sites').then(x=>x.json());
+  if(r.ok && r.settings){ settings = r.settings; }
+  renderSettings();
+}
+
+async function saveSettings(){
+  const body = {
+    auto: $('optAuto').checked ? 'true' : 'false',
+    interval: String($('optInterval').value),
+    incremental: $('optIncremental').checked ? 'true' : 'false'
+  };
+  const r = await fetch('/api/settings', {
+    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)
+  }).then(x=>x.json());
+  if(!r.ok){ setStatus('设置保存失败：' + (r.error||''), 'bad'); return false; }
+  settings.autoEnabled = r.autoEnabled;
+  settings.autoIntervalSeconds = r.autoIntervalSeconds;
+  settings.incremental = r.incremental;
+  renderSettings();
+  return true;
+}
+
+function openSettings(){ $('mask').className = 'mask show'; }
+function closeSettings(){ $('mask').className = 'mask'; }
+
+$('btnCheck').onclick = checkLogin;
+$('btnLogin').onclick = openLogin;
+
+/* 单击＝按当前设置拉取；双击＝打开设置弹窗（两击 320ms 内算双击） */
+let clickTimer = null;
+$('btnFetch').onclick = () => {
+  if(clickTimer){ clearTimeout(clickTimer); clickTimer = null; openSettings(); return; }
+  clickTimer = setTimeout(() => { clickTimer = null; startFetch(false); }, 320);
+};
+$('range').onchange = loadAnalysis;
+$('optInterval').oninput = () => { $('optIntervalVal').textContent = $('optInterval').value + ' s'; };
+$('btnCancel').onclick = closeSettings;
+$('mask').onclick = (e) => { if(e.target === $('mask')) closeSettings(); };
+$('btnSave').onclick = async () => { if(await saveSettings()){ closeSettings(); await startFetch(false); } };
+$('btnFull').onclick = async () => { await saveSettings(); closeSettings(); await startFetch(true); };
+
+(async function(){
+  await loadSites();
+  await loadSettings();
+  await refreshAutoState();
+  setInterval(refreshAutoState, 3000);
+  await loadAnalysis();
+  await checkLogin();
+})();
 
 async function poll(){
   if(timer) clearInterval(timer);
   timer = setInterval(async () => {
     const r = await fetch('/api/progress').then(x=>x.json());
+    renderAutoState(r);
     if(r.phase === 'running'){ setStatus('采集中 · ' + r.message); return; }
     clearInterval(timer); timer = null;
     if(r.phase === 'done'){
@@ -346,17 +474,6 @@ async function poll(){
     else if(r.phase === 'failed'){ setStatus('失败：' + r.message, 'bad'); }
   }, 700);
 }
-
-$('btnCheck').onclick = checkLogin;
-$('btnLogin').onclick = openLogin;
-$('btnFetch').onclick = startFetch;
-$('range').onchange = loadAnalysis;
-
-(async function(){
-  await loadSites();
-  await loadAnalysis();
-  await checkLogin();
-})();
 </script>
 </body>
 </html>

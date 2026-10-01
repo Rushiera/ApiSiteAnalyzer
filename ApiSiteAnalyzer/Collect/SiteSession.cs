@@ -123,18 +123,21 @@ public sealed class SiteSession
     /// </summary>
     /// <param name="site">站点适配器。</param>
     /// <param name="pageSize">页大小（≤100）。</param>
-    /// <param name="onPage">单页回调（页码, 页结果）；返回 false 可中止。</param>
+    /// <param name="options">拉取选项（增量追平 / 追平链长）。</param>
+    /// <param name="onPage">单页回调（页码, 页结果）——回执里给出本页新增与命中数，供追平判定。</param>
     /// <param name="progress">进度提示回调（文本）。</param>
     /// <param name="ct">取消令牌。</param>
     /// <returns>拉取汇总（含登录态——调用方据此决定是否引导登录）。</returns>
     public async Task<FetchSummary> FetchAllAsync(
         IApiSite site,
         int pageSize,
-        Func<int, UsagePage, bool> onPage,
+        FetchOptions options,
+        Func<int, UsagePage, PageOutcome> onPage,
         Action<string> progress,
         CancellationToken ct)
     {
         var summary = new FetchSummary();
+        int confirmStreak = options.ConfirmStreak > 0 ? options.ConfirmStreak : 20;
 
         CdpSession session;
         try
@@ -160,6 +163,7 @@ public sealed class SiteSession
 
             int page = 1;
             int total = -1;
+            int streak = 0;
 
             while (true)
             {
@@ -185,16 +189,33 @@ public sealed class SiteSession
                     break;
                 }
 
-                if (!onPage(page, current))
+                PageOutcome outcome = onPage(page, current);
+                summary.Added += outcome.NewCount;
+                summary.Matched += outcome.MatchedCount;
+
+                // [段1] 追平链长——本页整页命中则接续累计，否则从页尾的连续命中数重新起算
+                streak = outcome.TailMatched == current.Records.Count ? streak + outcome.TailMatched : outcome.TailMatched;
+
+                if (outcome.Stop)
                 {
                     summary.Error = "入库回调中止";
                     return summary;
                 }
 
                 summary.Fetched += current.Records.Count;
-                progress("已拉取第 " + page + " 页 · 累计 " + summary.Fetched + " / " + (total < 0 ? "?" : total.ToString()));
+                progress("已拉取第 " + page + " 页 · 累计 " + summary.Fetched + " / " + (total < 0 ? "?" : total.ToString()) +
+                    " · 新增 " + summary.Added + " · 一致 " + summary.Matched);
 
-                // [段1] 到底判据：本页不足一页，或已覆盖服务端报告的 total
+                // [段2] 增量追平——站点列表「新的在前」，连续读到与库内完全一致的记录（默认 20 条）
+                //        即认定其后都是已入库的历史，停止后续请求（省页数与刷新频控额度）
+                if (options.Incremental && streak >= confirmStreak)
+                {
+                    summary.StoppedEarly = true;
+                    progress("已追平历史（连续 " + streak + " 条与库内一致）——停止后续拉取");
+                    break;
+                }
+
+                // [段3] 到底判据：本页不足一页，或已覆盖服务端报告的 total
                 if (current.Records.Count < pageSize)
                 {
                     break;
@@ -457,6 +478,35 @@ public sealed class SiteSession
     }
 }
 
+/// <summary>拉取选项。</summary>
+public sealed class FetchOptions
+{
+    /// <summary>
+    /// 增量追平——站点列表「新的在前」，连续读到 ConfirmStreak 条与库内完全一致的记录即停止后续拉取。
+    /// 关掉即全量拉到底（首次入库 / 需重扫历史时用）。
+    /// </summary>
+    public bool Incremental { get; set; } = true;
+
+    /// <summary>追平确认链长（默认 20）——必须连续这么多条与库内完全一致才认定已追平。</summary>
+    public int ConfirmStreak { get; set; } = 20;
+}
+
+/// <summary>单页入库回执——供追平判定。</summary>
+public sealed class PageOutcome
+{
+    /// <summary>本页新增条数（库内没有或字段有变化）。</summary>
+    public int NewCount { get; set; }
+
+    /// <summary>本页与库内完全一致的条数。</summary>
+    public int MatchedCount { get; set; }
+
+    /// <summary>本页尾部连续一致的条数（下一轮追平链从它接续）。</summary>
+    public int TailMatched { get; set; }
+
+    /// <summary>是否要求中止整轮拉取。</summary>
+    public bool Stop { get; set; }
+}
+
 /// <summary>拉取汇总。</summary>
 public sealed class FetchSummary
 {
@@ -471,6 +521,15 @@ public sealed class FetchSummary
 
     /// <summary>拉取条数。</summary>
     public int Fetched { get; set; }
+
+    /// <summary>新增条数（库内没有或字段有变化——增量模式下通常远小于 Fetched）。</summary>
+    public int Added { get; set; }
+
+    /// <summary>与库内完全一致的条数。</summary>
+    public int Matched { get; set; }
+
+    /// <summary>是否因追平历史而提前停止（省下后续页的请求）。</summary>
+    public bool StoppedEarly { get; set; }
 
     /// <summary>服务端报告总条数（-1 = 未知）。</summary>
     public int Total { get; set; } = -1;

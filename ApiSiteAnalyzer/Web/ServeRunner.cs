@@ -44,6 +44,8 @@ public static class ServeRunner
         var queue = new TaskQueue();
         var dbPath = Path.Combine(dataDir, "usage.db");
         var state = new PanelState(sites, dbPath);
+        var settings = new PanelSettings(Path.Combine(dataDir, "settings.json"));
+        var collector = new AutoCollector(session, sites, dbPath, state, settings);
 
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
@@ -105,6 +107,48 @@ public static class ServeRunner
                 hasUpdate = IsNewer(newestVersion, running),
                 sites = list,
                 running = state.Running,
+                settings = new
+                {
+                    autoEnabled = settings.AutoEnabled,
+                    autoIntervalSeconds = settings.AutoIntervalSeconds,
+                    incremental = settings.Incremental,
+                    minIntervalSeconds = PanelSettings.MinIntervalSeconds,
+                    maxIntervalSeconds = PanelSettings.MaxIntervalSeconds,
+                },
+            });
+        });
+
+        // [段2b] 保存面板设置（自动采集开关 + 间隔）——落 data/settings.json
+        //        入口面零容忍：缺值 / 非法值一律报错，不静默回落默认值
+        app.MapPost("/api/settings", async (HttpContext context) =>
+        {
+            string auto = await ReadFieldAsync(context, "auto");
+            string interval = await ReadFieldAsync(context, "interval");
+            string incremental = await ReadFieldAsync(context, "incremental");
+
+            if (auto != "true" && auto != "false")
+            {
+                return Results.Json(new { ok = false, error = "auto 必须是 true / false，收到：" + auto });
+            }
+
+            if (incremental != "true" && incremental != "false")
+            {
+                return Results.Json(new { ok = false, error = "incremental 必须是 true / false，收到：" + incremental });
+            }
+
+            if (!int.TryParse(interval, out int seconds))
+            {
+                return Results.Json(new { ok = false, error = "interval 必须是整数秒，收到：" + interval });
+            }
+
+            settings.Update(auto == "true", seconds, incremental == "true");
+            collector.Reset();
+            return Results.Json(new
+            {
+                ok = true,
+                autoEnabled = settings.AutoEnabled,
+                autoIntervalSeconds = settings.AutoIntervalSeconds,
+                incremental = settings.Incremental,
             });
         });
 
@@ -168,26 +212,27 @@ public static class ServeRunner
         });
 
         // [段5] 拉取——入队，后台跑；面板轮询 /api/progress
+        //        full=true 为全量重扫（不追平提前停止）；默认走增量（站点列表新的在前，追平即停）
         app.MapPost("/api/fetch", async (HttpContext context) =>
         {
             string siteId = await ReadFieldAsync(context, "site");
+            string full = await ReadFieldAsync(context, "full");
             IApiSite? site = FindSite(sites, siteId);
             if (site is null)
             {
                 return Results.Json(new { ok = false, error = "未知站点：" + siteId });
             }
 
-            if (state.Running)
+            bool incremental = full != "true" && settings.Incremental;
+            if (!state.TryBegin(site.DisplayName))
             {
                 return Results.Json(new { ok = false, error = "已有采集在进行中" });
             }
-
-            state.Begin(site.DisplayName);
             _ = Task.Run(async () =>
             {
                 try
                 {
-                    await FetchSiteAsync(session, site, dbPath, state).ConfigureAwait(false);
+                    await FetchSiteAsync(session, site, dbPath, state, incremental).ConfigureAwait(false);
                 }
                 catch (Exception ex)
                 {
@@ -195,7 +240,12 @@ public static class ServeRunner
                 }
             });
 
-            return Results.Json(new { ok = true, message = "已开始采集" });
+            return Results.Json(new
+            {
+                ok = true,
+                incremental = incremental,
+                message = incremental ? "已开始增量采集（追平历史即停）" : "已开始全量采集",
+            });
         });
 
         // [段6] 进度
@@ -286,6 +336,9 @@ public static class ServeRunner
         string url = "http://127.0.0.1:" + config.Port + "/";
         Console.WriteLine("ApiSiteAnalyzer 面板已启动：" + url);
         Console.WriteLine("站点：" + string.Join(" / ", sites.Select(s => s.DisplayName)));
+        Console.WriteLine("自动采集：" + (settings.AutoEnabled ? "开（每 " + settings.AutoIntervalSeconds + " 秒）" : "关"));
+
+        _ = collector.RunAsync(ct);
         OpenBrowser(url);
 
         await app.RunAsync(ct).ConfigureAwait(false);
@@ -392,47 +445,20 @@ public static class ServeRunner
     }
 
     /// <summary>拉取一个站点并逐页入库。</summary>
-    private static async Task FetchSiteAsync(SiteSession session, IApiSite site, string dbPath, PanelState state)
+    /// <param name="session">站点会话。</param>
+    /// <param name="site">站点适配器。</param>
+    /// <param name="dbPath">库路径。</param>
+    /// <param name="state">面板运行态。</param>
+    /// <param name="incremental">是否增量（追平历史即停）。</param>
+    public static async Task FetchSiteAsync(SiteSession session, IApiSite site, string dbPath, PanelState state, bool incremental)
     {
         using var db = new Db(dbPath);
 
         FetchSummary summary = await session.FetchAllAsync(
             site,
             100,
-            (page, result) =>
-            {
-                var buffer = new List<UsageRecord>();
-                foreach (string record in result.Records)
-                {
-                    UsageRow row = site.ParseRow(record);
-                    buffer.Add(new UsageRecord
-                    {
-                        SiteId = site.Id,
-                        LogKey = row.LogKey,
-                        RemoteId = row.RemoteId,
-                        CreatedAt = row.CreatedAt,
-                        Type = row.Type,
-                        ModelName = row.ModelName,
-                        TokenName = row.TokenName,
-                        GroupName = row.Group,
-                        Quota = row.Quota,
-                        PromptTokens = row.PromptTokens,
-                        CompletionTokens = row.CompletionTokens,
-                        CacheTokens = row.CacheTokens,
-                        UseTime = row.UseTime,
-                        FirstTokenMs = row.FirstTokenMs,
-                        SpeedTps = row.SpeedTps,
-                        IsStream = row.IsStream,
-                        Channel = row.Channel,
-                        UpstreamModel = row.UpstreamModel,
-                        RequestId = row.RequestId,
-                        Content = row.Content,
-                    });
-                }
-
-                db.Upsert(buffer);
-                return true;
-            },
+            new FetchOptions { Incremental = incremental },
+            (page, result) => PageWriter.Write(db, site, result),
             text => state.Progress(text),
             CancellationToken.None).ConfigureAwait(false);
 
@@ -459,34 +485,87 @@ public static class ServeRunner
             db.SaveSnapshot(site.Id, summary.Snapshot);
         }
 
-        state.Done("完成：拉取 " + summary.Pages + " 页 / " + summary.Fetched + " 条 · 库内 " + rows + " 行");
+        state.Done("完成：拉取 " + summary.Pages + " 页 / " + summary.Fetched + " 条 · 新增 " + summary.Added +
+            " 条 · 库内 " + rows + " 行" + (summary.StoppedEarly ? " · 已追平历史（提前停止）" : ""));
     }
 
-    /// <summary>从请求体里读一个表单字段（JSON 或 form）。</summary>
+    /// <summary>请求体字段缓存键（HttpContext.Items）。</summary>
+    private const string FieldCacheKey = "asa.form.fields";
+
+    /// <summary>
+    /// 从请求体里读一个字段（JSON 或 form）。
+    /// 🔴 **请求体只能读一次**——读第二次得到空串。故本方法把整份字段缓存进 `HttpContext.Items`，
+    /// 同一请求内多次取字段复用同一份（否则第二个字段起静默变空，调用方只看到「值没生效」）。
+    /// </summary>
+    /// <param name="context">HTTP 上下文。</param>
+    /// <param name="field">字段名。</param>
+    /// <returns>字段值（缺 = 空串）。</returns>
     private static async Task<string> ReadFieldAsync(HttpContext context, string field)
     {
+        if (!context.Items.TryGetValue(FieldCacheKey, out object? cached) || cached is not Dictionary<string, string> map)
+        {
+            map = await ReadAllFieldsAsync(context).ConfigureAwait(false);
+            context.Items[FieldCacheKey] = map;
+        }
+
+        return map.TryGetValue(field, out string? value) ? value : "";
+    }
+
+    /// <summary>读整份请求字段（form 或 JSON 体，缺则查 query）。</summary>
+    /// <param name="context">HTTP 上下文。</param>
+    /// <returns>字段表。</returns>
+    private static async Task<Dictionary<string, string>> ReadAllFieldsAsync(HttpContext context)
+    {
+        var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
         if (context.Request.HasFormContentType)
         {
             IFormCollection form = await context.Request.ReadFormAsync().ConfigureAwait(false);
-            return form[field].ToString();
+            foreach (string key in form.Keys)
+            {
+                map[key] = form[key].ToString();
+            }
+
+            return map;
         }
 
         using var reader = new StreamReader(context.Request.Body, Encoding.UTF8);
         string body = await reader.ReadToEndAsync().ConfigureAwait(false);
+
         if (body.Trim().Length == 0)
         {
-            return context.Request.Query[field].ToString();
+            foreach (var pair in context.Request.Query)
+            {
+                map[pair.Key] = pair.Value.ToString();
+            }
+
+            return map;
         }
 
         try
         {
             using JsonDocument doc = JsonDocument.Parse(body);
-            return doc.RootElement.TryGetProperty(field, out JsonElement value) ? (value.GetString() ?? "") : "";
+            if (doc.RootElement.ValueKind == JsonValueKind.Object)
+            {
+                foreach (JsonProperty property in doc.RootElement.EnumerateObject())
+                {
+                    map[property.Name] = property.Value.ValueKind switch
+                    {
+                        JsonValueKind.String => property.Value.GetString() ?? "",
+                        JsonValueKind.True => "true",
+                        JsonValueKind.False => "false",
+                        JsonValueKind.Number => property.Value.ToString(),
+                        _ => "",
+                    };
+                }
+            }
         }
         catch (JsonException)
         {
-            return "";
+            // 体不是合法 JSON——按空字段表处理（调用方按缺值处置）
         }
+
+        return map;
     }
 
     /// <summary>按站点键找适配器。</summary>

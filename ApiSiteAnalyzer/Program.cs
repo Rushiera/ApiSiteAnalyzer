@@ -31,7 +31,23 @@ public static class Program
         Console.InputEncoding = Encoding.UTF8;
 
         string command = args.Length > 0 ? args[0] : "serve";
-        string configPath = ResolveConfigPath(args.Length > 1 ? args[1] : "");
+
+        // [段1] 选项与位置参数分开——`fetch --full` 里 --full 不是配置文件路径
+        bool fullScan = false;
+        string configArg = "";
+        for (int i = 1; i < args.Length; i++)
+        {
+            if (string.Equals(args[i], "--full", StringComparison.OrdinalIgnoreCase))
+            {
+                fullScan = true;
+            }
+            else if (configArg.Length == 0)
+            {
+                configArg = args[i];
+            }
+        }
+
+        string configPath = ResolveConfigPath(configArg);
 
         try
         {
@@ -45,7 +61,7 @@ public static class Program
             return command switch
             {
                 "check" => await RunCheckAsync(sites, chromePath, dataDir, CancellationToken.None).ConfigureAwait(false),
-                "fetch" => await RunFetchAsync(sites, chromePath, dataDir, CancellationToken.None).ConfigureAwait(false),
+                "fetch" => await RunFetchAsync(sites, chromePath, dataDir, !fullScan, CancellationToken.None).ConfigureAwait(false),
                 "stats" => RunStats(sites, dataDir),
                 "sites" => RunSites(sites),
                 "serve" => await ServeRunner.RunAsync(config, sites, chromePath, dataDir, CancellationToken.None).ConfigureAwait(false),
@@ -130,7 +146,13 @@ public static class Program
     }
 
     /// <summary>拉取各站用量并入库。</summary>
-    private static async Task<int> RunFetchAsync(List<IApiSite> sites, string chromePath, string dataDir, CancellationToken ct)
+    /// <param name="sites">站点清单。</param>
+    /// <param name="chromePath">chrome.exe 路径。</param>
+    /// <param name="dataDir">数据目录。</param>
+    /// <param name="incremental">是否增量（追平历史即停）。</param>
+    /// <param name="ct">取消令牌。</param>
+    /// <returns>退出码。</returns>
+    private static async Task<int> RunFetchAsync(List<IApiSite> sites, string chromePath, string dataDir, bool incremental, CancellationToken ct)
     {
         var hub = new BrowserHub(chromePath, Path.Combine(dataDir, "browsers.json"));
         var session = new SiteSession(hub);
@@ -141,22 +163,12 @@ public static class Program
         foreach (IApiSite site in sites)
         {
             Console.WriteLine("== " + site.DisplayName + " ==");
-            var buffer = new List<UsageRecord>();
 
             FetchSummary summary = await session.FetchAllAsync(
                 site,
                 100,
-                (page, result) =>
-                {
-                    buffer.Clear();
-                    foreach (string record in result.Records)
-                    {
-                        buffer.Add(ToRecord(site, record));
-                    }
-
-                    db.Upsert(buffer);
-                    return true;
-                },
+                new FetchOptions { Incremental = incremental },
+                (page, result) => PageWriter.Write(db, site, result),
                 text => Console.WriteLine("  " + text),
                 ct).ConfigureAwait(false);
 
@@ -173,7 +185,8 @@ public static class Program
 
             long rows = db.Count(site.Id);
             db.MarkFetched(site.Id, rows);
-            Console.WriteLine("  完成：拉取 " + summary.Pages + " 页 / " + summary.Fetched + " 条 · 库内 " + rows + " 行");
+            Console.WriteLine("  完成：拉取 " + summary.Pages + " 页 / " + summary.Fetched + " 条 · 新增 " + summary.Added +
+                " 条 · 库内 " + rows + " 行" + (summary.StoppedEarly ? " · 已追平历史（提前停止）" : ""));
             Console.WriteLine("  真实余额：" + summary.Balance + " quota = " +
                 (summary.Balance / site.QuotaPerUnit).ToString("0.0000") + " " + site.CurrencySymbol);
 
@@ -191,38 +204,6 @@ public static class Program
         }
 
         return failed > 0 ? 1 : 0;
-    }
-
-    /// <summary>把一条原始记录转成库行。</summary>
-    /// <param name="site">站点适配器。</param>
-    /// <param name="record">原始记录 JSON 文本。</param>
-    /// <returns>库行。</returns>
-    private static UsageRecord ToRecord(IApiSite site, string record)
-    {
-        UsageRow row = site.ParseRow(record);
-        return new UsageRecord
-        {
-            SiteId = site.Id,
-            LogKey = row.LogKey,
-            RemoteId = row.RemoteId,
-            CreatedAt = row.CreatedAt,
-            Type = row.Type,
-            ModelName = row.ModelName,
-            TokenName = row.TokenName,
-            GroupName = row.Group,
-            Quota = row.Quota,
-            PromptTokens = row.PromptTokens,
-            CompletionTokens = row.CompletionTokens,
-            CacheTokens = row.CacheTokens,
-            UseTime = row.UseTime,
-            FirstTokenMs = row.FirstTokenMs,
-            SpeedTps = row.SpeedTps,
-            IsStream = row.IsStream,
-            Channel = row.Channel,
-            UpstreamModel = row.UpstreamModel,
-            RequestId = row.RequestId,
-            Content = row.Content,
-        };
     }
 
     /// <summary>打印库内计数。</summary>

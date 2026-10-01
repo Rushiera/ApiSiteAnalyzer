@@ -12,12 +12,12 @@ API 站用量分析器（**C# / .NET 8**）。把 API 站的用量日志**全量
 ApiSiteAnalyzer/                主项目
   Config/                       配置加载（严格模式——未知键 / 类型错报错退出）
   Browser/                      CDP 通道（chrome 启动器 / 会话 / 受控实例中心）
-  Collect/                      站点会话（登录探测 + 分页拉取 + 口径快照）
+  Collect/                      站点会话（登录探测 + 分页拉取 + 口径快照）+ 逐页落库器
   Sites/                        站点适配器（IApiSite + NewApiSite）
-  Store/                        SQLite 库（幂等写入 + 聚合查询）
-  Web/                          Minimal API 端点 + wwwroot/index.html
+  Store/                        SQLite 库（幂等写入 + 增量比对 + 聚合查询）
+  Web/                          Minimal API 端点 + 自动采集器 + wwwroot/index.html
 config.json                     站点清单 + 端口 + chrome 路径
-data/                           运行时生成：usage.db · browsers.json · profiles/<站点>/
+data/                           运行时生成：usage.db · settings.json · browsers.json · profiles/<站点>/
 启动.bat                        启动器：停旧面板 → 起最新槽位
 ApiSiteAnalyzer_A.exe           槽位 A（部署产物，随仓走）
 ApiSiteAnalyzer_B.exe           槽位 B
@@ -28,17 +28,57 @@ ApiSiteAnalyzer_B.exe           槽位 B
 双击 `启动.bat`（或命令行跑 `ApiSiteAnalyzer_A.exe serve`）。子命令：
 
 ```
-ApiSiteAnalyzer_A.exe check    # 探测登录态（含真实余额）
-ApiSiteAnalyzer_A.exe fetch    # 全量拉取用量 + 口径快照入库
-ApiSiteAnalyzer_A.exe serve    # 起面板（默认，双击 exe 等同）
-ApiSiteAnalyzer_A.exe stats    # 库内计数
-ApiSiteAnalyzer_A.exe sites    # 站点清单
+ApiSiteAnalyzer_A.exe check            # 探测登录态（含真实余额）
+ApiSiteAnalyzer_A.exe fetch            # 增量拉取（追平历史即停）+ 口径快照入库
+ApiSiteAnalyzer_A.exe fetch --full     # 全量重扫到底（不提前停止）
+ApiSiteAnalyzer_A.exe serve            # 起面板（默认，双击 exe 等同）
+ApiSiteAnalyzer_A.exe stats            # 库内计数
+ApiSiteAnalyzer_A.exe sites            # 站点清单
 ```
 
 开发态用 `dotnet run --project ApiSiteAnalyzer -- <子命令>`。
 
 **配置查找**：当前工作目录优先，缺则回落 exe 同级；两处都没有即报错退出（不静默起空面板）。
 配置内的相对路径（`data` 目录）一律相对**配置文件所在目录**解析，故可在任意工作目录调用。
+
+## 增量拉取（追平即停）
+
+站点列表**新的在前**（`logs.id desc`）。据此：逐页比对库内既有记录，
+**连续 20 条**与库内完全一致（含 token / 额度 / 耗时等全部业务字段）即认定其后都是已入库的历史——
+停止后续请求。省下的是页数，也就是站点的刷新频控额度。
+
+实测（2026-10-01，库内 3000+ 行）：
+
+| 情形 | 全量口径 | 增量口径 |
+|:--|:--|:--|
+| 30 页 / 2995 条 | 30 页全拉 | — |
+| 有 102 条新记录 | 30 页 | **1 页**（首页 100 条里第 99 条起连续一致） |
+| 无新记录 | 30 页 | **1 页**（首页 98 条一致即追平） |
+
+判据（服务端打印）：
+`完成：拉取 1 页 / 100 条 · 新增 2 条 · 库内 2996 行 · 已追平历史（提前停止）`
+
+- **比对在写入之前**——写入后旧行已被新值覆盖，"是否与库内一致"就问不出来了
+- **不比 `remote_id`**——站点展示序号每次查询从 1 重排，拿它判定会误报「有变化」
+- 想强制重扫历史：CLI 加 `--full`；面板弹窗里点「全量拉取一次」
+
+## 自动采集（面板）
+
+**双击「拉取数据」**打开设置弹窗：
+
+| 项 | 说明 |
+|:--|:--|
+| 自动采集 | 勾选框，**默认勾选** |
+| 间隔 | 滑块 **5–119 秒**，**默认 29 秒** |
+| 增量拉取 | 勾选框，默认勾选——按上一节的「追平即停」口径拉 |
+| 全量拉取一次 | 按下的那一次不提前停止，用于重扫历史 |
+
+- **单击**「拉取数据」= 按当前设置拉一次；**双击** = 打开设置弹窗
+- 设置存 `data/settings.json`（运行时数据，不入仓；`config.json` 是部署期声明，面板不回写它）
+- **计时归服务端**（`Web/AutoCollector.cs`）：关掉页面照样按时拉。
+  若计时挂在页面上，关掉页面就悄悄不跑了——「设置说开着、实际没跑」正是静默失败
+- 顶部状态显示「自动采集 29s（下次 11:03:22）」，页面刷新后是同一个时刻
+- 间隔越界一律夹进 5–119；`auto` / `interval` 缺值或非法值**报错拒绝**，不静默回落默认值
 
 ## 更新（双槽部署）
 
@@ -72,7 +112,7 @@ move CatTemp\asa-publish\ApiSiteAnalyzer.exe ApiSiteAnalyzer_B.exe
 1. 面板点「去登录」（或 CLI 跑 `check` 时按提示）→ 程序打开一个**可见的**浏览器窗口并切到登录页
 2. 你在那个窗口里登录（账号密码 / 扫码 / 两步验证都行）
 3. 回到面板点「检查登录」→ 显示用户名与**真实余额**即成功
-4. 点「拉取数据」→ 全量入库
+4. 点「拉取数据」→ 增量入库（追平历史即停）
 
 登录态存在**浏览器用户目录**里（`data/profiles/<站点键>`）——只要不删这个目录，下次免登录。
 
@@ -135,6 +175,16 @@ access_token 只活在页面里（`window.__asaToken`），从不回传程序进
     产物走**双槽 + 仓库外暂存区**：publish 到 `CatTemp/asa-publish/`，再 move 进空闲槽，由 `启动.bat` 起最新槽位。
 17. **面板不杀浏览器实例**——登录态在浏览器用户目录里，杀面板不动浏览器；新面板启动时自动接管既有实例（判例 15）。
     所以更新面板**不影响登录**，不需要重新登录。
+18. **HTTP 请求体只能读一次**（2026-10-01 判例）——`ReadFieldAsync` 原先每调一次就把请求体读一遍，
+    第二个字段起拿到的是**空串**。症状隐蔽：`/api/settings` 三个字段，`auto` 读到了、`interval` 读到 0——
+    表现为「保存了但没生效」，不报错。现把整份字段缓存进 `HttpContext.Items`，同一请求内复用（判例详见
+    `CCBP:Project/ApiSiteAnalyzer/design-ApiSiteAnalyzer_log.md` §七）。
+19. **有带参构造的类不能直接当反序列化目标**——`PanelSettings(string path)` 被 System.Text.Json 当成
+    反序列化构造函数，而 `path` 没有对应属性 → **启动即抛**（面板起不来，CLI 不受影响）。
+    落盘结构拆出独立无参 DTO（`PanelSettings.SettingsFile`），序列化面与运行态对象解耦。
+20. **面板设置与部署配置分家**——`config.json` 是部署期声明（严格校验、未知键报错、启动链只读）；
+    面板改的自动采集开关 / 间隔属**运行期用户设置**，落 `data/settings.json`。启动链不回写部署配置
+    （全量回写 + 混装文件 = 静默吞字段）。
 
 ## t/s 口径复算（本地自算列）
 
@@ -180,6 +230,9 @@ t/s = completion_tokens / use_time   （四舍五入取整）
 - **适配器可插拔**：站点差异全收在 `IApiSite` 实现里——采集链 / 库 / 分析面 / 面板零改动。
 - **幂等入库**：主键 `(site_id, log_key)`，`log_key` 取 `request_id`——重复拉取只更新、不重复。
 - **逐页落盘**：每页到手即写库，进度可见（面板状态条 / CLI 逐行打印）。
+- **增量追平**：列表新的在前 → 连续 20 条与库内一致即停（`Store/Db.MatchExisting` + `Collect/PageWriter`）。
+- **落库口径唯一**：CLI 与面板共用 `PageWriter`——两处各写一份必然漂移。
+- **自动采集归服务端**：`Web/AutoCollector` 每秒对表；关掉页面照样跑（计时挂页面 = 关页面就静默不跑）。
 - **库结构版本化**：`PRAGMA user_version` 核对；不匹配则备份旧库（`.bak-vN-时间戳`）并重建，出声不静默。
 - **失败可见**：未登录 / 拉取中断 / 接口异常 / 配置错误一律出声，不静默回落成空表。
 - **WAL + busy_timeout**：WAL 未生效即抛错（不静默退回 delete 模式）。
