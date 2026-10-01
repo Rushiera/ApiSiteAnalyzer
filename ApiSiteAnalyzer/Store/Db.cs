@@ -670,14 +670,17 @@ ON CONFLICT (site_id) DO UPDATE SET fetched_at=excluded.fetched_at, total_count=
         return filled;
     }
 
-    /// <summary>按小时聚合（本地时区，跨天累计）。**空档补齐**——固定 00–23 全 24 行，无记录小时给 0 行。</summary>
+    /// <summary>按小时聚合（本地时区）。**空档补齐**——固定 00–23 全 24 行，无记录小时给 0 行。不给日期即跨天累计（「当前」视图口径）。</summary>
     /// <param name="siteId">站点键。</param>
     /// <param name="types">记录类型白名单。</param>
+    /// <param name="day">限定日期（yyyy-MM-dd，本地时区；空 = 跨天累计）。</param>
     /// <returns>聚合行（按小时升序，Name = 00..23）。</returns>
-    public List<AggregateRow> ByHour(string siteId, IReadOnlyList<int> types)
+    public List<AggregateRow> ByHour(string siteId, IReadOnlyList<int> types, string day = "")
     {
-        List<AggregateRow> rows = GroupByExpr(siteId, "strftime('%H', created_at, 'unixepoch', 'localtime')", types, 0, true);
-        if (rows.Count == 0)
+        List<AggregateRow> rows = GroupByExpr(siteId, "strftime('%H', created_at, 'unixepoch', 'localtime')", types, 0, true, day);
+        /* 指定日期时必须铺满 00–23——那天没有记录也铺 0 行（横轴连续，不跳档）；
+           跨天累计无记录时保持空表（面板显示「暂无数据」，比 24 个空行清楚） */
+        if (rows.Count == 0 && day.Length == 0)
         {
             return rows;
         }
@@ -689,7 +692,7 @@ ON CONFLICT (site_id) DO UPDATE SET fetched_at=excluded.fetched_at, total_count=
             known[row.Name] = row;
         }
 
-        // [段2] 00–23 全 24 行（跨天累计口径不变）
+        // [段2] 00–23 全 24 行
         List<AggregateRow> filled = new List<AggregateRow>();
         for (int hour = 0; hour < 24; hour = hour + 1)
         {
@@ -843,16 +846,29 @@ ON CONFLICT (site_id) DO UPDATE SET fetched_at=excluded.fetched_at, total_count=
     }
 
     /// <summary>按任意表达式聚合。</summary>
-    private List<AggregateRow> GroupByExpr(string siteId, string expression, IReadOnlyList<int> types, int limit, bool ascending)
+    /// <param name="siteId">站点键。</param>
+    /// <param name="expression">分组表达式（SQL 片段）。</param>
+    /// <param name="types">记录类型白名单。</param>
+    /// <param name="limit">返回条数上限（0 = 不限）。</param>
+    /// <param name="ascending">true = 按分组名升序，false = 按额度倒序。</param>
+    /// <param name="whereDay">限定日期（yyyy-MM-dd，本地时区；空 = 不限定）。</param>
+    private List<AggregateRow> GroupByExpr(string siteId, string expression, IReadOnlyList<int> types, int limit, bool ascending, string whereDay = "")
     {
         var rows = new List<AggregateRow>();
 
         using var cmd = _conn.CreateCommand();
         string order = ascending ? "ORDER BY 1 ASC" : "ORDER BY 3 DESC";
         string tail = limit > 0 ? " LIMIT " + limit : "";
+        string filter = BuildTypeFilter(cmd, types);
+        if (whereDay.Length > 0)
+        {
+            filter = filter + " AND strftime('%Y-%m-%d', created_at, 'unixepoch', 'localtime') = $day";
+            cmd.Parameters.AddWithValue("$day", whereDay);
+        }
+
         cmd.CommandText = "SELECT " + expression + " AS k, COUNT(*), COALESCE(SUM(quota),0), " +
             "COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), COALESCE(SUM(cache_tokens),0) " +
-            "FROM usage_log WHERE site_id=$site" + BuildTypeFilter(cmd, types) + " GROUP BY k " + order + tail + ";";
+            "FROM usage_log WHERE site_id=$site" + filter + " GROUP BY k " + order + tail + ";";
         cmd.Parameters.AddWithValue("$site", siteId);
 
         using SqliteDataReader reader = cmd.ExecuteReader();

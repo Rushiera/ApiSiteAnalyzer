@@ -323,10 +323,18 @@ public static class ServeRunner
                 _ => new[] { 2 },
             };
 
+            // [段0] 按小时图的日期筛选——给了就必须是 yyyy-MM-dd（入口面零容忍，不静默回落成「当前」视图）
+            string day = context.Request.Query["day"].ToString();
+            if (day.Length > 0 && !DateTime.TryParseExact(day, "yyyy-MM-dd",
+                    System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out DateTime _))
+            {
+                return Results.Json(new { ok = false, error = "day 非法（yyyy-MM-dd）：" + day });
+            }
+
             // [段7a] 总览——合并全部站点的记录；不是真实站点，故在站点查找之前分流
             if (IsAllSites(siteId))
             {
-                return Results.Json(BuildAllSitesAnalysis(dbPath, sites, types, state));
+                return Results.Json(BuildAllSitesAnalysis(dbPath, sites, types, state, day));
             }
 
             IApiSite? site = FindSite(sites, siteId);
@@ -339,7 +347,7 @@ public static class ServeRunner
             OverviewStat overview = db.Overview(site.Id, types);
             List<AggregateRow> byModel = db.ByModel(site.Id, types, 30);
             List<AggregateRow> byDay = db.ByDay(site.Id, types);
-            List<AggregateRow> byHour = db.ByHour(site.Id, types);
+            List<AggregateRow> byHour = db.ByHour(site.Id, types, day);
             List<AggregateRow> byToken = db.ByToken(site.Id, types, 20);
             List<AggregateRow> byGroup = db.ByGroup(site.Id, types, 20);
             List<UsageRecord> recent = db.Recent(site.Id, types, 50);
@@ -603,11 +611,12 @@ public static class ServeRunner
     /// <param name="sites">站点清单。</param>
     /// <param name="types">记录类型白名单（空 = 全部）。</param>
     /// <param name="state">面板运行态（取各站最近一次探到的真实余额）。</param>
+    /// <param name="day">限定「按小时」的日期（yyyy-MM-dd；空 = 跨天累计）。</param>
     /// <returns>响应对象。</returns>
-    private static object BuildAllSitesAnalysis(string dbPath, List<IApiSite> sites, int[] types, PanelState state)
+    private static object BuildAllSitesAnalysis(string dbPath, List<IApiSite> sites, int[] types, PanelState state, string day)
     {
         using var db = new Db(dbPath);
-        AllSitesResult all = SiteAggregate.Build(db, sites, types, state.BalanceOf);
+        AllSitesResult all = SiteAggregate.Build(db, sites, types, state.BalanceOf, day);
         var blocks = new Dictionary<string, SiteBlock>(StringComparer.Ordinal);
         foreach (SiteBlock block in all.Sites)
         {

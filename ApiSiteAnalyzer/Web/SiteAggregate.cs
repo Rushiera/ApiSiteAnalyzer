@@ -187,8 +187,9 @@ public static class SiteAggregate
     /// <param name="sites">站点清单。</param>
     /// <param name="types">记录类型白名单（空 = 全部）。</param>
     /// <param name="balanceOf">按站点取最近一次探到的真实余额（quota 单位）。</param>
+    /// <param name="day">限定「按小时」的日期（yyyy-MM-dd；空 = 跨天累计）。</param>
     /// <returns>跨站合并结果。</returns>
-    public static AllSitesResult Build(Db db, IReadOnlyList<IApiSite> sites, IReadOnlyList<int> types, Func<string, long> balanceOf)
+    public static AllSitesResult Build(Db db, IReadOnlyList<IApiSite> sites, IReadOnlyList<int> types, Func<string, long> balanceOf, string day = "")
     {
         var result = new AllSitesResult();
         var recent = new List<UsageRecord>();
@@ -211,7 +212,7 @@ public static class SiteAggregate
             // [段1] 分组行——各站取全量（limit=0）再合并，合并后按金额倒序截断（截断放在合并之后，避免漏掉跨站前排）
             Merge(result.ByModel, db.ByModel(site.Id, types, 0), unit);
             Merge(result.ByDay, db.ByDay(site.Id, types), unit);
-            Merge(result.ByHour, db.ByHour(site.Id, types), unit);
+            Merge(result.ByHour, db.ByHour(site.Id, types, day), unit);
             Merge(result.ByToken, db.ByToken(site.Id, types, 0), unit);
             Merge(result.ByGroup, db.ByGroup(site.Id, types, 0), unit);
 

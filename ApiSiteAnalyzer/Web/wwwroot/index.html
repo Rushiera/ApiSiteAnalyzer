@@ -71,6 +71,16 @@
   .bar .val{text-align:right;font-variant-numeric:tabular-nums}
   /* 空档补齐行——库里这一天 / 这一小时没有记录，淡出呈现（不画填充条） */
   .bar.empty{opacity:.45}
+  /* 按天（窄）/ 按小时（宽）——宽度 1:2，按天占三分之一 */
+  .grid-dayhour{display:grid;grid-template-columns:1fr 2fr;gap:14px}
+  @media (max-width:900px){.grid-dayhour{grid-template-columns:1fr}}
+  /* 窄栏（按天）里的条形行——名字是 yyyy-MM-dd，值列也窄些 */
+  .grid-dayhour .col-day .bar{grid-template-columns:84px 1fr 104px}
+  /* 按天行可点选——点某天 → 右侧只看那天；点顶部「当前」→ 回到跨天累计 */
+  .bar.clickable{cursor:pointer;border-radius:5px;padding:3px 5px;margin:2px -5px}
+  .bar.clickable:hover{background:#1b2230}
+  .bar.selected{background:#1d2735;box-shadow:inset 0 0 0 1px #2f4a6d}
+  .bar.selected .name{color:var(--accent);font-weight:600}
   .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
   @media (max-width:900px){.grid2{grid-template-columns:1fr}}
   .scroll{max-height:460px;overflow:auto}
@@ -230,21 +240,21 @@
 
   <div class="cards" id="cards"></div>
 
+  <div class="grid-dayhour">
+    <section class="col-day">
+      <h2>按天 <span class="muted">· 点选看当天小时分布</span></h2>
+      <div class="bars" id="byDay"></div>
+    </section>
+    <section class="col-hour">
+      <h2 id="hourTitle">按小时分布</h2>
+      <div class="bars" id="byHour"></div>
+    </section>
+  </div>
+
   <section>
     <h2>按模型</h2>
     <div class="bars" id="byModel"></div>
   </section>
-
-  <div class="grid2">
-    <section>
-      <h2>按天</h2>
-      <div class="bars" id="byDay"></div>
-    </section>
-    <section>
-      <h2>按小时分布</h2>
-      <div class="bars" id="byHour"></div>
-    </section>
-  </div>
 
   <div class="grid2">
     <section>
@@ -282,6 +292,8 @@ const ALL_SITE = '__all';
 let currentSite = '';
 let timer = null;
 let siteMap = {};
+/* 按小时图的日期选择——空串 = 「当前」（跨天累计：今天的记录 + 今天还没到的时刻沿用历史）；否则只看那一天 */
+let selDay = '';
 /* 各站最近一次探到的真实余额（服务端按站点分开记，页面只做显示） */
 let balances = {};
 /* 各站最近一次探到的登录态（服务端按站点分开记——总览站点块据此标出「掉登录」） */
@@ -301,6 +313,9 @@ function fmtMs(sec){ if(!sec) return '—'; return fmtNum(Math.round(Number(sec)
 function fmtTime(sec){ if(!sec) return '—'; const d=new Date(sec*1000); const p=n=>String(n).padStart(2,'0');
   return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds()); }
 function esc(s){ return String(s===null||s===undefined?'':s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+/* 今天的日期键（yyyy-MM-dd，本地时区）——与库内 strftime('%Y-%m-%d', ..., 'localtime') 同一口径 */
+function todayKey(){ const d = new Date(); const p = n => String(n).padStart(2,'0');
+  return d.getFullYear() + '-' + p(d.getMonth()+1) + '-' + p(d.getDate()); }
 
 function setStatus(text, kind){
   const el = $('status');
@@ -462,16 +477,37 @@ function renderBars(container, rows, sym, opts){
   opts = opts || {};
   const el = $(container);
   if(!rows || !rows.length){ el.innerHTML = '<div class="muted">暂无数据</div>'; return; }
-  const max = Math.max.apply(null, rows.map(r => r.quota || 0)) || 1;
-  el.innerHTML = rows.map(r => {
+  /* 按天列表顶部固定一行「当前」——点它回到跨天累计口径；数值取「今天」那一行（当前视图的主体就是今天） */
+  let list = rows;
+  if(opts.days){
+    let today = null;
+    const key = todayKey();
+    rows.forEach(r => { if(r.name === key){ today = r; } });
+    list = [{name:'当前', amount: today ? today.amount : 0, quota: today ? today.quota : 0, count: today ? today.count : 0, current: true}].concat(rows);
+  }
+  const max = Math.max.apply(null, list.map(r => r.quota || 0)) || 1;
+  el.innerHTML = list.map(r => {
     /* 空档补齐行（count = 0——库里这一天没有记录）不画条、整行淡出，与「有记录但金额为 0」区分 */
-    const empty = !r.count;
+    const empty = !r.count && !r.current;
     const w = empty ? 0 : Math.max(1, Math.round((r.quota||0) / max * 100));
     const label = opts.label ? opts.label(r) : r.name;
-    return '<div class="bar' + (empty ? ' empty' : '') + '"><div class="name" title="'+esc(r.name)+'">'+esc(label)+'</div>' +
+    const selected = opts.days && (r.current ? selDay === '' : selDay === r.name);
+    const cls = 'bar' + (empty ? ' empty' : '') + (opts.days ? ' clickable' : '') + (selected ? ' selected' : '');
+    const tip = opts.days
+      ? (r.current ? '当前视图：今天的记录 + 今天还没到的时刻沿用历史（跨天累计）' : ('只看 ' + r.name + ' 这一天的小时分布'))
+      : r.name;
+    return '<div class="' + cls + '"' + (opts.days ? ' data-day="' + esc(r.current ? '' : r.name) + '"' : '') +
+      '><div class="name" title="'+esc(tip)+'">'+esc(label)+'</div>' +
       '<div class="track"><div class="fill" style="width:'+w+'%"></div></div>' +
       '<div class="val">'+fmtAmount(r.amount, sym)+' <span class="muted">/ '+fmtNum(r.count)+'</span></div></div>';
   }).join('');
+}
+
+/* 按小时图的标题——选中某天 / 当前（跨天累计）两种口径必须写在标题上，不让读者猜 */
+function renderHourTitle(){
+  $('hourTitle').innerHTML = selDay
+    ? '按小时分布 · ' + esc(selDay) + ' <span class="muted">（只看这一天）</span>'
+    : '按小时分布 <span class="muted">（当前：今天的记录 + 未到时刻沿用历史）</span>';
 }
 
 function renderCards(o, sym){
@@ -545,15 +581,19 @@ async function loadAnalysis(){
   if(!currentSite) return;
   const asked = currentSite;
   const range = $('range').value;
-  const r = await fetch('/api/analysis?site=' + encodeURIComponent(asked) + '&range=' + range).then(x=>x.json());
-  /* 期间切了站点——丢弃过期响应，不让上一个站的数据落在新站的画面上 */
-  if(asked !== currentSite) return;
+  const askedDay = selDay;
+  const url = '/api/analysis?site=' + encodeURIComponent(asked) + '&range=' + range +
+    (askedDay ? '&day=' + encodeURIComponent(askedDay) : '');
+  const r = await fetch(url).then(x=>x.json());
+  /* 期间切了站点 / 改了选中日期——丢弃过期响应，不让旧口径的数据落在新画面上 */
+  if(asked !== currentSite || askedDay !== selDay) return;
   if(!r.ok){ setStatus('分析数据读取失败：' + (r.error||''), 'bad'); return; }
   const sym = r.site.currencySymbol;
   renderCards(r.overview, sym);
   renderBars('byModel', r.byModel, sym);
-  renderBars('byDay', r.byDay, sym, {label: x => x.name});
+  renderBars('byDay', r.byDay, sym, {label: x => x.name, days: true});
   renderBars('byHour', r.byHour, sym, {label: x => x.name + ' 时'});
+  renderHourTitle();
   renderBars('byToken', r.byToken, sym);
   renderBars('byGroup', r.byGroup, sym);
   renderRecent(r.recent, sym);
@@ -834,6 +874,15 @@ $('btnFetch').onclick = () => {
   clickTimer = setTimeout(() => { clickTimer = null; startFetch(false); }, 320);
 };
 $('range').onchange = loadAnalysis;
+/* 按天点选——点某天只看那天的小时分布；点顶部「当前」回到跨天累计（当前视图） */
+$('byDay').onclick = (e) => {
+  const row = e.target.closest('.bar.clickable');
+  if(!row) return;
+  const day = row.dataset.day || '';
+  if(day === selDay) return;
+  selDay = day;
+  loadAnalysis();
+};
 $('optInterval').oninput = () => { $('optIntervalVal').textContent = $('optInterval').value + ' s'; };
 $('btnCancel').onclick = closeSettings;
 $('mask').onclick = (e) => { if(e.target === $('mask')) closeSettings(); };
