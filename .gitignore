@@ -1,0 +1,9 @@
+bin/
+obj/
+publish/
+*.user
+.vs/
+*.pdb
+
+# 运行时数据（登录态载体 + 本地库）
+data/

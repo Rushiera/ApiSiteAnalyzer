@@ -1,0 +1,149 @@
+﻿# ApiSiteAnalyzer
+
+API 站用量分析器（**C# / .NET 8**）。把 API 站的用量日志**全量**拉全、落库留存、做多维分析——取代在站点网页里逐页翻。
+
+首站：贤鱼 API（`https://api.xyjun.fun`，New API v1.0.0-rc.40）。
+
+> 架构与选型 → `CCBP:Project/ApiSiteAnalyzer/design-ApiSiteAnalyzer.md` §〇。
+
+## 目录
+
+```
+ApiSiteAnalyzer/                主项目
+  Config/                       配置加载（严格模式——未知键 / 类型错报错退出）
+  Browser/                      CDP 通道（chrome 启动器 / 会话 / 受控实例中心）
+  Collect/                      站点会话（登录探测 + 分页拉取 + 口径快照）
+  Sites/                        站点适配器（IApiSite + NewApiSite）
+  Store/                        SQLite 库（幂等写入 + 聚合查询）
+  Web/                          Minimal API 端点 + wwwroot/index.html
+config.json                     站点清单 + 端口 + chrome 路径
+data/                           运行时生成：usage.db · browsers.json · profiles/<站点>/
+ApiSiteAnalyzer.exe             单文件产物（framework-dependent，依赖 .NET 8 运行时）
+```
+
+## 运行
+
+```
+ApiSiteAnalyzer.exe check    # 探测登录态（含真实余额）
+ApiSiteAnalyzer.exe fetch    # 全量拉取用量 + 口径快照入库
+ApiSiteAnalyzer.exe serve    # 起面板（默认，双击 exe 等同）
+ApiSiteAnalyzer.exe stats    # 库内计数
+ApiSiteAnalyzer.exe sites    # 站点清单
+```
+
+开发态用 `dotnet run --project ApiSiteAnalyzer -- <子命令>`。
+
+单文件发布：
+
+```
+dotnet publish ApiSiteAnalyzer\ApiSiteAnalyzer.csproj -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
+```
+
+**配置查找**：当前工作目录优先，缺则回落 exe 同级；两处都没有即报错退出（不静默起空面板）。
+配置内的相对路径（`data` 目录）一律相对**配置文件所在目录**解析，故可在任意工作目录调用。
+
+## 登录
+
+**程序不存账号密码。** 登录归人：
+
+1. 面板点「去登录」（或 CLI 跑 `check` 时按提示）→ 程序打开一个**可见的**浏览器窗口并切到登录页
+2. 你在那个窗口里登录（账号密码 / 扫码 / 两步验证都行）
+3. 回到面板点「检查登录」→ 显示用户名与**真实余额**即成功
+4. 点「拉取数据」→ 全量入库
+
+登录态存在**浏览器用户目录**里（`data/profiles/<站点键>`）——只要不删这个目录，下次免登录。
+
+**凭据不出浏览器**：所有需要凭据的请求都在页面上下文里发出（页面内 `fetch`），
+access_token 只活在页面里（`window.__asaToken`），从不回传程序进程、从不落盘。
+
+## 三类数字（别混淆）
+
+面板把三种口径**分开放**，因为它们的含义不同：
+
+| 位置 | 来源 | 含义 |
+|:--|:--|:--|
+| **真实余额**（金色大行） | `GET /api/user/self` → `data.quota` | **这是真实余额**——dashboard/overview 页「剩余额度」显示的就是它 |
+| **站点口径**（第二行） | `GET /api/data/self`（按小时聚合）→ 前端汇总 | dashboard/models 页那套「总数 / 总额度 / 总 TOKEN 数 / 平均 RPM·TPM」——**站点自己的聚合口径** |
+| **本地汇总**（卡片 + 图表） | 本地 SQLite 逐条汇总 | 从落库的全量明细算出来的——**分析用这一套** |
+
+站点口径与本地汇总**未必相等**（实测差约 1%：站点 2177 次 / 本地 2196 次）——因为站点按自己的窗口与聚合规则算。
+两者都展示、互不覆盖。
+
+## 站点实况与判例
+
+1. **`/usage-logs/common` 是前端路由，不是接口**——直接 curl 返回 React 空壳 HTML。真实数据在
+   `GET /api/log/self?p=N&page_size=100`。
+2. **面板接口只认 `Authorization: Bearer`**，不认 cookie——页面内裸 fetch 会 401。
+   cookie（`new_api_refresh`，HttpOnly）只用于 `POST /api/user/auth/refresh` 换 access_token。
+3. **刷新接口有频控**——实测连续调用会 429 + `retry-after: 492`（秒）。故设计上**一轮拉取只刷一次**，
+   token 缓存在页面上下文里；401 才重刷，且遵守冷却窗口。
+4. **分页口径**（上游 `common/page_info.go` 与本站实测一致）：`p` 1 起、`page_size` 上限 100、
+   排序 `logs.id desc`（新的在前）；`total` 字段随响应返回，翻到 `ceil(total/100)` 即到底。
+5. **站点返回的 `id` 是展示序号，不是稳定键**——每次查询从 1 重排。
+   拿它当主键会导致整库错位更新（实测：第二次拉取时 id 1 被新记录占用，覆盖掉旧记录）。
+   **改用 `request_id` 作主键**（唯一且稳定）；缺失时退化为「时刻+模型+用量」组合键。
+6. **全量拉取不带时间区间**——站点默认只给当天（`/usage-logs/common` 页默认 24 小时窗口）。
+   要历史就**不带** `start_timestamp` / `end_timestamp`。
+7. **token 捕获走页面钩子**——`Page.addScriptToEvaluateOnNewDocument` **必须在导航之前**调用；
+   注入列表会累积，故每个用户目录只注入一次（登记在 `browsers.json` 的 `hookedSites`，跨进程持久），
+   且补注入后要重新加载页面让钩子生效。
+8. **不要重复导航**——页面已在站点域内时重新导航会清掉 `window.__asaToken`，逼出一次多余刷新（撞频控）。
+   判据：`location.href` 已以站点根开头 → 不导航。
+9. **登录必须在通道标签页里做**——程序驱动的只有一个标签页（登记在 `browsers.json` 的 `channelTargetId`）。
+   你在浏览器里另开标签页登录，程序看不到（那是个独立上下文）。所以「去登录」按钮会把**通道标签页本身**导航到登录页。
+10. **`other` 字段是字符串化的 JSON**——`cache_tokens` / `frt`（首字延迟毫秒）/ `upstream_model_name`
+    在里面；解析失败按缺项处理，不影响主字段。
+11. **缓存命中率口径**：本站 `prompt_tokens` **不含**缓存部分，故命中率 = `cache_tokens / (prompt_tokens + cache_tokens)`。
+12. **`frt`（首字延迟）实测出现负值**——全量 2199 条里有 2 条为 `-1000`、3 条为 `0`。
+    聚合时按 `> 0` 过滤（原值保留可追溯）。
+13. **模型名大小写不统一**——实测同一上游三种写法（`DeepSeek-V4.1-Flash-gq` / `DeepSeek-V4.1-Flash` / `Deepseek-V4.1-Flash`）。
+    按原值入库、不归一——归一会掩盖站点的模型映射实况。
+
+## t/s 口径复算（本地自算列）
+
+站点 `/usage-logs/common` 每行显示一个 `xx t/s`。**实测复算结论**：
+
+```
+t/s = completion_tokens / use_time   （四舍五入取整）
+```
+
+**六条样本逐条对上**（站点显示值 vs 本地复算）：
+
+| 站点显示 | completion | use_time | 复算 | 取整 |
+|--:|--:|--:|--:|--:|
+| 24 t/s | 121 | 5 | 24.2000 | 24 ✅ |
+| 13 t/s | 53 | 4 | 13.2500 | 13 ✅ |
+| 193 t/s | 3091 | 16 | 193.1875 | 193 ✅ |
+| 522 t/s | 188351 | 361（6m1s） | 521.7479 | 522 ✅ |
+| 166 t/s | 1491 | 9 | 165.6667 | 166 ✅ |
+| 57 t/s | 284 | 5 | 56.8000 | 57 ✅ |
+
+**命中 6/6**。反例排除：
+
+- **截断取整**（`floor`）只对 3/6 ——排除
+- **扣掉首字延迟**（`completion / (use_time - frt)`）差得远（93 vs 24）——排除
+
+**落库形态**：`speed_tps` 列（`REAL`），由本地在入库时自算（`completion_tokens / use_time`）。
+全库一致性实测：与公式不一致的行数 **0**、负值 **0**（`use_time=0` 的 2 条按 0 计）。
+面板「最近记录」有独立的 **t/s** 列，卡片里有「平均速率」。
+
+**速率分布实测**（2196 条消费记录）：
+
+| 区间 | 条数 |
+|:--|--:|
+| 100–200 t/s | 1092 |
+| 50–100 t/s | 483 |
+| 20–50 t/s | 347 |
+| ≥200 t/s | 153 |
+| <20 t/s | 119 |
+| 0（use_time=0） | 2 |
+
+## 设计要点
+
+- **适配器可插拔**：站点差异全收在 `IApiSite` 实现里——采集链 / 库 / 分析面 / 面板零改动。
+- **幂等入库**：主键 `(site_id, log_key)`，`log_key` 取 `request_id`——重复拉取只更新、不重复。
+- **逐页落盘**：每页到手即写库，进度可见（面板状态条 / CLI 逐行打印）。
+- **库结构版本化**：`PRAGMA user_version` 核对；不匹配则备份旧库（`.bak-vN-时间戳`）并重建，出声不静默。
+- **失败可见**：未登录 / 拉取中断 / 接口异常 / 配置错误一律出声，不静默回落成空表。
+- **WAL + busy_timeout**：WAL 未生效即抛错（不静默退回 delete 模式）。
+- **面板数字可复算**：每个聚合都能用一条 SQL 在库上复算。

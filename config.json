@@ -1,0 +1,15 @@
+{
+  "chromePath": "",
+  "port": 8766,
+  "sites": [
+    {
+      "id": "xyjun",
+      "type": "newapi",
+      "displayName": "贤鱼 API",
+      "baseUrl": "https://api.xyjun.fun",
+      "profileDir": "",
+      "quotaPerUnit": 500000,
+      "currencySymbol": "¤"
+    }
+  ]
+}
