@@ -119,8 +119,13 @@
     margin-top:2px;color:var(--dim)}
   .deltaline.good{color:var(--ok)}
   .deltaline.bad{color:var(--bad)}
-  /* 可点卡片——点开逐条明细弹窗 */
-  .card.clickable{cursor:pointer;transition:border-color .15s}
+  /* 卡片可拖排序（整卡拖——不设把手）：整卡即把手，光标统一为 grab；
+     拖起的卡淡出、悬停目标描边（不设专门把手——按需求：直接拖拽卡片本体） */
+  .card{cursor:grab}
+  .card.dragging{opacity:.4}
+  .card.hover{box-shadow:inset 0 0 0 1px var(--accent)}
+  /* 可点卡片——点开逐条明细弹窗（拖过不放行点击，见 click 处理里的 dragMoved 判据） */
+  .card.clickable{transition:border-color .15s}
   .card.clickable:hover{border-color:var(--accent)}
   .card.clickable .k::after{content:' ↗';color:var(--accent)}
 
@@ -404,7 +409,12 @@ async function loadSites(keep){
     ver.textContent = cur;
   }
   ver.title = (r.exePath || '') + (r.newestExe ? '　最新槽位：' + r.newestExe : '');
-  if(r.settings){ settings = r.settings; renderSettings(); }
+  if(r.settings){
+    settings = r.settings;
+    renderSettings();
+    /* 顺序为空 / 缺字段即回默认（服务端已规整过，这里只兜底——旧版本面板没有 cardOrder） */
+    cardOrder = (r.settings.cardOrder && r.settings.cardOrder.length) ? r.settings.cardOrder.slice() : CARD_KEYS.slice();
+  }
   const sel = $('site');
   sel.innerHTML = '';
   siteMap = {};
@@ -623,15 +633,23 @@ function renderHourTitle(){
     : '按小时分布 <span class="muted">（当前：今天的记录 + 未到时刻沿用历史）</span>';
 }
 
+/* 卡片键（按**默认顺序**）——拖拽排序的锚：与服务端 PanelSettings.DefaultCardOrder 同值，改名须同步两端。
+   顺序表按索引对应 renderCards 的 items（二者相邻，改一处即改另一处）；顺序存 data/settings.json（服务端） */
+const CARD_KEYS = ['requestIds', 'amount', 'amount24h', 'promptTokens', 'completionTokens',
+  'cacheHitRate', 'cacheTokens', 'avgFirstToken', 'avgUseTime', 'avgSpeed',
+  'prompt24h', 'completion24h', 'cacheHitRate24h', 'requestIds24h'];
+
 function renderCards(o, sym){
   const n = o.recentSampleCount || 0;
   const win = n >= 10 ? '近十次' : ('近 ' + n + ' 次');
   /* 对比行参照窗口——再往前十次（第 11–20 次）的样本数；不足即如实说明，不静默省略 */
   const pc = o.prevSampleCount || 0;
-  /* 卡片条目：[标签, 值, 弹窗键?, 下方小字 HTML?]——第 4 项供「输入 Token」挂缓存小字、三个均值卡片挂对比行 */
+  /* 卡片条目：[标签, 值, 弹窗键?, 下方小字 HTML?]——第 3 项供「已探明请求 ID」挂点击弹窗，第 4 项供「输入 Token」挂缓存小字、三个均值卡片挂对比行
+     条目按默认顺序给出（下标即 CARD_KEYS 的下标）——显示顺序由下面那次重排决定，勿在此处调顺序 */
   /* 顺序（2026-10-02 显示口径轮 · 二轮）：已探明请求 ID 在 本地消费金额 之前 ·
      本地记录数 换成 近 24 小时消费金额（带前 24 小时对比行）· 缓存命中率 在 缓存 Token 之前
-     消费金额取 mode='down'——花得少为绿（2026-10-02 三轮口径；用量四项仍 'up'） */
+           消费金额取 mode='down'——花得少为绿（2026-10-02 三轮口径；用量四项仍 'up'）
+      ⚠ 这是**默认顺序**——用户拖拽排定的顺序在服务端（data/settings.json），按 cardOrder 重排后输出 */
   const items = [
     ['已探明请求 ID', fmtNum(o.requestIdCount), 'requestIds'],
     ['本地消费金额', fmtAmount(o.amount, sym)],
@@ -655,9 +673,104 @@ function renderCards(o, sym){
     ['近 24 小时已探明请求 ID', fmtNum(o.last24h.requestIdCount), null,
       delta24Line(o.last24h.requestIdCount, o.prev24h.requestIdCount, o.prev24h.count, fmtNum(o.prev24h.requestIdCount), 'up')],
   ];
-  $('cards').innerHTML = items.map(it =>
-    '<div class="card' + (it[2] ? ' clickable' : '') + '"' + (it[2] ? ' data-key="' + it[2] + '"' : '') +
-    '><div class="k">'+esc(it[0])+'</div><div class="v">'+esc(it[1])+'</div>' + (it[3] || '') + '</div>').join('');
+  /* 最近一次卡片的渲染入参——拖拽改序后据此**原样重渲染**（不重拉分析接口：改顺序不该动数据） */
+  lastCards = { o: o, sym: sym };
+  $('cards').innerHTML = orderedCardIndex().map(i => {
+    const it = items[i];
+    return '<div class="card' + (it[2] ? ' clickable' : '') + '" draggable="true" data-ckey="' + esc(CARD_KEYS[i]) + '"' +
+      (it[2] ? ' data-key="' + it[2] + '"' : '') +
+      '><div class="k">'+esc(it[0])+'</div><div class="v">'+esc(it[1])+'</div>' + (it[3] || '') + '</div>';
+  }).join('');
+}
+
+/* 卡片显示顺序——按用户排定的 cardOrder 给出 items 的下标序列：
+   排定顺序里缺的键（将来新增的卡片）补到尾部，按默认顺序相对保序；
+   cardOrder 里已撤下的键不进结果（不留幽灵格）。单点实现，渲染与探针共用 */
+function orderedCardIndex(){
+  const rank = (cardOrder && cardOrder.indexOf) ? cardOrder : [];
+  const idx = CARD_KEYS.map((k, i) => i);
+  idx.sort((a, b) => {
+    const ra = rank.indexOf(CARD_KEYS[a]);
+    const rb = rank.indexOf(CARD_KEYS[b]);
+    /* 未排定（新卡片）一律排在已排定之后，按默认顺序相对保序 */
+    if(ra < 0 && rb < 0) return a - b;
+    if(ra < 0) return 1;
+    if(rb < 0) return -1;
+    return ra - rb;
+  });
+  return idx;
+}
+
+/* 提交卡片顺序——落服务端 data/settings.json（换浏览器 / 清缓存都在）。
+   ⚠ 走独立端点 /api/card-order：/api/settings 带 collector.Reset()（重置自动采集计时），
+   拖一次卡片打乱一次采集节奏是不可接受的副作用 */
+async function saveCardOrder(order){
+  const r = await fetch('/api/card-order', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ order: order.join(',') })
+  }).then(x=>x.json());
+  if(!r.ok){ setStatus('卡片顺序保存失败：' + (r.error||''), 'bad'); return false; }
+  cardOrder = (r.cardOrder && r.cardOrder.length) ? r.cardOrder.slice() : order.slice();
+  return true;
+}
+
+/* 卡片区拖拽排序——整卡可拖（不设把手）：
+   · 拖起时记源键；拖到目标卡上即换位（目标原本在源之后 → 落在目标后面，与手的位置一致）
+   · 先本地重排再提交服务端；提交失败即回滚到拖动前的顺序并重渲染——不留「看起来改了其实没存」的假象
+   · 拖过即置 dragMoved，click 处理据此放行弹窗：按下就起拖的那一下不会顺手打开弹窗 */
+function bindCardDrag(){
+  const box = $('cards');
+  /* 每次按下先清「拖过」标记——上一次拖拽留下的标记会吃掉这一次真正的点击 */
+  box.addEventListener('mousedown', () => { dragMoved = false; });
+  box.addEventListener('dragstart', (e) => {
+    const card = e.target.closest('.card');
+    if(!card) return;
+    dragKey = card.dataset.ckey || '';
+    dragMoved = false;
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', dragKey);
+    card.classList.add('dragging');
+  });
+  box.addEventListener('dragover', (e) => {
+    if(!dragKey) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    dragMoved = true;
+    const over = e.target.closest('.card');
+    box.querySelectorAll('.card.hover').forEach(el => el.classList.remove('hover'));
+    if(over && over.dataset.ckey !== dragKey){ over.classList.add('hover'); }
+  });
+  box.addEventListener('drop', async (e) => {
+    if(!dragKey) return;
+    e.preventDefault();
+    const over = e.target.closest('.card');
+    const before = cardOrder.slice();
+    box.querySelectorAll('.card.hover').forEach(el => el.classList.remove('hover'));
+    let moved = false;
+    if(over && over.dataset.ckey && over.dataset.ckey !== dragKey){
+      const from = cardOrder.indexOf(dragKey);
+      const at = cardOrder.indexOf(over.dataset.ckey);
+      if(from >= 0 && at >= 0){
+        cardOrder.splice(from, 1);
+        /* 目标原本在源之后 → 插到目标**后面**；否则插到它前面 */
+        cardOrder.splice(cardOrder.indexOf(over.dataset.ckey) + (at > from ? 1 : 0), 0, dragKey);
+        moved = true;
+      }
+    }
+    dragKey = '';
+    /* 拖到自己身上 / 拖出卡片区 = 无换位——不提交、不重排、不动状态条（没有改动可报） */
+    if(!moved){ return; }
+    if(await saveCardOrder(cardOrder)){
+      setStatus('卡片顺序已保存', 'ok');
+    }else{
+      cardOrder = before;
+    }
+    renderLastCards();
+  });
+  box.addEventListener('dragend', () => {
+    dragKey = '';
+    box.querySelectorAll('.card').forEach(el => el.classList.remove('dragging','hover'));
+  });
 }
 
 /* 输入下方小黄字（最近记录列与「输入 Token」卡片共用）：A（命中缓存 B）——A = 输入 − 缓存（未命中部分），B = 缓存 token */
@@ -884,6 +997,23 @@ let work = null;
 /* ---------- 采集设置（双击「拉取数据」打开） ---------- */
 /* 计时归服务端（AutoCollector）——页面只负责显示与改设置：
    若计时挂在页面上，关掉页面就悄悄不跑了（「设置说开着、实际没跑」= 静默失败） */
+/* 卡片顺序（拖拽排定）——键序列，与 CARD_KEYS 同一套字符串；
+   存服务端 data/settings.json（换浏览器 / 清缓存都不丢），不与 localStorage 分家出第二个设置面 */
+let cardOrder = CARD_KEYS.slice();
+
+/* 最近一次卡片的渲染入参（分析面 o + 货币符号）——拖拽改序后据此原样重渲染，不重拉接口 */
+let lastCards = null;
+
+/* 拖拽中的源卡片键——只在 dragstart 与 drop 之间有效；整卡可拖（不设把手），
+   故「按下即起拖」与「点击开弹窗」必须分开：拖过（或移动过）就不触发点击 */
+let dragKey = '';
+let dragMoved = false;
+
+/* 按当前顺序原样重渲染卡片——顺序改动只影响排列，不重拉分析接口（数据与顺序无关） */
+function renderLastCards(){
+  if(lastCards) renderCards(lastCards.o, lastCards.sym);
+}
+
 let settings = { autoEnabled:true, autoIntervalSeconds:29, incremental:true, minIntervalSeconds:3, maxIntervalSeconds:119 };
 
 function renderSettings(){
@@ -1109,9 +1239,12 @@ $('btnIdMore').onclick = loadRequestIds;
 $('btnIdClose').onclick = closeRequestIds;
 $('idmask').onclick = (e) => { if(e.target === $('idmask')) closeRequestIds(); };
 $('cards').onclick = (e) => {
+  /* 整卡可拖——拖过就不再当点击（按下即起拖的那一下不该顺手打开弹窗） */
+  if(dragMoved) return;
   const card = e.target.closest('.card.clickable');
   if(card && card.dataset.key === 'requestIds') openRequestIds();
 };
+bindCardDrag();
 
 (async function(){
   await loadSites();

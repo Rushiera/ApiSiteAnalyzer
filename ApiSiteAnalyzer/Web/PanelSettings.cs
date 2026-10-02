@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text.Encodings.Web;
 using System.Text.Json;
@@ -38,6 +39,7 @@ public sealed class PanelSettings
     {
         _path = path;
         Load();
+        CardOrder = NormalizeCardOrder(CardOrder);
     }
 
     /// <summary>是否开启自动采集（默认开）。</summary>
@@ -48,6 +50,100 @@ public sealed class PanelSettings
 
     /// <summary>拉取是否走增量（追平即停；默认开）。</summary>
     public bool Incremental { get; set; } = true;
+
+    /// <summary>卡片顺序（拖拽排定的卡片键序列）——与自动采集设置同一份文件，换浏览器 / 清缓存都不丢。</summary>
+    public List<string> CardOrder { get; set; } = new List<string>(DefaultCardOrder);
+
+    /// <summary>
+    /// 卡片键默认顺序——与面板 `renderCards` 的 items 顺序**同值**（新增卡片须同步两端；
+    /// 键名与前端常量同为这套字符串，改名时先 grep 两端）。
+    /// </summary>
+    public static readonly string[] DefaultCardOrder =
+    {
+        "requestIds", "amount", "amount24h", "promptTokens", "completionTokens",
+        "cacheHitRate", "cacheTokens", "avgFirstToken", "avgUseTime", "avgSpeed",
+        "prompt24h", "completion24h", "cacheHitRate24h", "requestIds24h",
+    };
+
+    /// <summary>判断卡片键是否已知（未知键一律拒绝——入口面零容忍）。</summary>
+    /// <param name="key">卡片键。</param>
+    /// <returns>已知返回 true。</returns>
+    public static bool IsKnownCardKey(string key)
+    {
+        foreach (string known in DefaultCardOrder)
+        {
+            if (string.Equals(known, key, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// 规整卡片顺序——未知键剔除、重复键去重、缺失键按默认顺序补到尾部。
+    /// 读盘走这条（旧设置文件没有本字段 → 给全默认顺序；将来新增卡片不会因旧顺序表而丢失）。
+    /// </summary>
+    /// <param name="order">读到的顺序（可为 null）。</param>
+    /// <returns>规整后的完整顺序。</returns>
+    public static List<string> NormalizeCardOrder(List<string>? order)
+    {
+        var result = new List<string>();
+
+        if (order is not null)
+        {
+            foreach (string key in order)
+            {
+                if (IsKnownCardKey(key) && !result.Contains(key))
+                {
+                    result.Add(key);
+                }
+            }
+        }
+
+        foreach (string key in DefaultCardOrder)
+        {
+            if (!result.Contains(key))
+            {
+                result.Add(key);
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>设置卡片顺序并落盘——未知键报错拒绝（不静默剔除），缺失键按默认顺序补尾部。</summary>
+    /// <param name="raw">逗号分隔的卡片键序列。</param>
+    /// <param name="error">失败原因（成功为空串）。</param>
+    /// <returns>成功返回 true。</returns>
+    public bool SetCardOrder(string raw, out string error)
+    {
+        error = "";
+        var parsed = new List<string>();
+        string[] parts = raw.Split(',');
+
+        foreach (string part in parts)
+        {
+            string key = part.Trim();
+            if (key.Length == 0)
+            {
+                continue;
+            }
+
+            if (!IsKnownCardKey(key))
+            {
+                error = "未知卡片键：" + key;
+                return false;
+            }
+
+            parsed.Add(key);
+        }
+
+        CardOrder = NormalizeCardOrder(parsed);
+        Save();
+        return true;
+    }
 
     /// <summary>把间隔夹进合法区间（越界值一律夹紧，不静默留非法值）。</summary>
     /// <param name="seconds">待校验的秒数。</param>
@@ -99,6 +195,8 @@ public sealed class PanelSettings
             AutoEnabled = loaded.AutoEnabled;
             AutoIntervalSeconds = ClampInterval(loaded.AutoIntervalSeconds);
             Incremental = loaded.Incremental;
+            /* 旧设置文件没有 cardOrder（读到 null）→ 给全默认顺序——不静默丢卡片 */
+            CardOrder = NormalizeCardOrder(loaded.CardOrder);
         }
         catch (JsonException)
         {
@@ -118,6 +216,7 @@ public sealed class PanelSettings
             AutoEnabled = AutoEnabled,
             AutoIntervalSeconds = AutoIntervalSeconds,
             Incremental = Incremental,
+            CardOrder = CardOrder,
         };
 
         try
@@ -155,5 +254,8 @@ public sealed class PanelSettings
 
         /// <summary>是否增量拉取。</summary>
         public bool Incremental { get; set; } = true;
+
+        /// <summary>卡片顺序（卡片键序列）——缺即 null，由 Load 补全默认顺序。</summary>
+        public List<string>? CardOrder { get; set; }
     }
 }

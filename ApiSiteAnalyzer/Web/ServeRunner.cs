@@ -122,6 +122,7 @@ public static class ServeRunner
                     incremental = settings.Incremental,
                     minIntervalSeconds = PanelSettings.MinIntervalSeconds,
                     maxIntervalSeconds = PanelSettings.MaxIntervalSeconds,
+                    cardOrder = settings.CardOrder,
                 },
             });
         });
@@ -158,6 +159,22 @@ public static class ServeRunner
                 autoIntervalSeconds = settings.AutoIntervalSeconds,
                 incremental = settings.Incremental,
             });
+        });
+
+        // [段2c] 保存卡片顺序（面板拖拽排定）——落 data/settings.json
+        //        🔴 独立端点，不走 /api/settings：那个端点带 collector.Reset()（重置自动采集计时），
+        //        拖一次卡片就打乱一次采集节奏是不可接受的副作用
+        app.MapPost("/api/card-order", async (HttpContext context) =>
+        {
+            string raw = await ReadFieldAsync(context, "order");
+
+            // 入口面零容忍——未知键报错拒绝，不静默剔除
+            if (!settings.SetCardOrder(raw, out string error))
+            {
+                return Results.Json(new { ok = false, error = error });
+            }
+
+            return Results.Json(new { ok = true, cardOrder = settings.CardOrder });
         });
 
         // [段3] 登录态探测——未登录时面板提示「去登录」
