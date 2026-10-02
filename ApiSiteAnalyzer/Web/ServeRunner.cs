@@ -571,7 +571,7 @@ public static class ServeRunner
                 return Results.Json(new { ok = false, error = "offset 非法：" + offsetRaw });
             }
 
-            int limit = 200;
+            int limit = 50;
             string limitRaw = context.Request.Query["limit"].ToString();
             if (limitRaw.Length > 0 && (!int.TryParse(limitRaw, out limit) || limit < 1 || limit > 500))
             {
@@ -583,12 +583,14 @@ public static class ServeRunner
             if (IsAllSites(siteId))
             {
                 using var allDb = new Db(dbPath);
-                var merged = new List<RequestIdRow>();
+                var merged = new List<UsageRecord>();
+                var units = new Dictionary<string, double>(StringComparer.Ordinal);
                 long allTotal = 0;
                 foreach (IApiSite item in sites)
                 {
                     allTotal += allDb.RequestIdTotal(item.Id, types);
                     merged.AddRange(allDb.RequestIds(item.Id, types, offset + limit, 0));
+                    units[item.Id] = item.QuotaPerUnit <= 0 ? 500000 : item.QuotaPerUnit;
                 }
 
                 merged.Sort(CompareRequestId);
@@ -598,13 +600,8 @@ public static class ServeRunner
                     total = allTotal,
                     offset = offset,
                     limit = limit,
-                    items = merged.Skip(offset).Take(limit).Select(r => new
-                    {
-                        requestId = r.RequestId,
-                        createdAt = r.CreatedAt,
-                        siteId = r.SiteId,
-                        siteName = DisplayNameOf(sites, r.SiteId),
-                    }),
+                    items = merged.Skip(offset).Take(limit)
+                        .Select(r => MapRecent(r, DisplayNameOf(sites, r.SiteId), units.TryGetValue(r.SiteId, out double unit) ? unit : 500000)),
                 });
             }
 
@@ -616,7 +613,8 @@ public static class ServeRunner
 
             using var db = new Db(dbPath);
             long total = db.RequestIdTotal(site.Id, types);
-            List<RequestIdRow> items = db.RequestIds(site.Id, types, limit, offset);
+            List<UsageRecord> items = db.RequestIds(site.Id, types, limit, offset);
+            double siteUnit = site.QuotaPerUnit <= 0 ? 500000 : site.QuotaPerUnit;
 
             return Results.Json(new
             {
@@ -624,13 +622,7 @@ public static class ServeRunner
                 total = total,
                 offset = offset,
                 limit = limit,
-                items = items.Select(r => new
-                {
-                    requestId = r.RequestId,
-                    createdAt = r.CreatedAt,
-                    siteId = r.SiteId,
-                    siteName = site.DisplayName,
-                }),
+                items = items.Select(r => MapRecent(r, site.DisplayName, siteUnit)),
             });
         });
 
@@ -753,11 +745,11 @@ public static class ServeRunner
         return site is null ? siteId : site.DisplayName;
     }
 
-    /// <summary>请求 ID 行排序——时刻倒序、请求 ID 升序（与库内分页排序同序，跨站合并后仍稳定）。</summary>
+    /// <summary>请求 ID 明细排序——时刻倒序、请求 ID 升序（与库内分页排序同序，跨站合并后仍稳定）。</summary>
     /// <param name="left">左。</param>
     /// <param name="right">右。</param>
     /// <returns>比较结果。</returns>
-    private static int CompareRequestId(RequestIdRow left, RequestIdRow right)
+    private static int CompareRequestId(UsageRecord left, UsageRecord right)
     {
         int byTime = right.CreatedAt.CompareTo(left.CreatedAt);
         return byTime != 0 ? byTime : string.CompareOrdinal(left.RequestId, right.RequestId);
@@ -904,7 +896,7 @@ public static class ServeRunner
     /// <param name="cacheTokens">缓存 token。</param>
     /// <param name="token">三种 token 之和（输入 + 输出 + 缓存）——图表的排序与显示口径。</param>
     /// <returns>前端结构。</returns>
-    private static object MapRow(string name, long count, long quota, double amount, long promptTokens, long completionTokens, long cacheTokens, long token)
+    private static object MapRow(string name, long count, long quota, double amount, long promptTokens, long completionTokens, long cacheTokens, long token, long requestIdCount)
     {
         return new
         {

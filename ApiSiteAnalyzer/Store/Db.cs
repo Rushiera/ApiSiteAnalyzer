@@ -92,6 +92,8 @@ public sealed class AggregateRow
     public long CacheTokens { get; set; }
     /// <summary>三种 token 之和（输入 + 输出 + 缓存）——图表的排序与显示口径。</summary>
     public long Token { get; set; }
+    /// <summary>已探明请求 ID 数（去重——口径与总览卡片的「已探明请求 ID」一致）。</summary>
+    public long RequestIdCount { get; set; }
 }
 
 /// <summary>时间窗口统计（近 24 小时 / 前 24 小时）——卡片四项的窗口口径。</summary>
@@ -165,18 +167,6 @@ public sealed class OverviewStat
 
     /// <summary>前 24 小时窗口统计（24–48 小时前）——四项对比行的参照窗口。</summary>
     public WindowStat Prev24h { get; set; } = new WindowStat();
-}
-
-/// <summary>库内一条已探明请求 ID（去重后）及其出现时刻。</summary>
-public sealed class RequestIdRow
-{
-    /// <summary>站点请求 ID（库内稳定主键的来源）。</summary>
-    public string RequestId { get; set; } = "";
-
-    /// <summary>该请求的时刻（unix 秒）。</summary>
-    public long CreatedAt { get; set; }
-    /// <summary>所属站点键（跨站明细要标出来源）。</summary>
-    public string SiteId { get; set; } = "";
 }
 
 /// <summary>
@@ -661,32 +651,53 @@ ON CONFLICT (site_id) DO UPDATE SET fetched_at=excluded.fetched_at, total_count=
         return Convert.ToInt64(value);
     }
     /// <summary>
-    /// 按时刻倒序分页取已探明请求 ID（去重——口径与总览卡片的「已探明请求 ID」一致）。
+    /// 按时刻倒序分页取已探明请求 ID 对应的完整记录（去重——口径与总览卡片的「已探明请求 ID」一致）。
     /// 排序带次级键 request_id，保证分页稳定（仅按时刻排序时同刻行次序不定，翻页会重复 / 漏行）。
+    /// 同一 request_id 只留最新一条（库内主键 (site_id, log_key) 已保证唯一，此处按 request_id 防御式去重）。
     /// </summary>
     /// <param name="siteId">站点键。</param>
     /// <param name="types">记录类型白名单（空 = 全部）。</param>
     /// <param name="limit">本页条数。</param>
     /// <param name="offset">起始偏移。</param>
-    /// <returns>请求 ID 行（含时刻，按时刻倒序）。</returns>
-    public List<RequestIdRow> RequestIds(string siteId, IReadOnlyList<int> types, int limit, int offset)
+    /// <returns>记录清单（完整字段，按时刻倒序）。</returns>
+    public List<UsageRecord> RequestIds(string siteId, IReadOnlyList<int> types, int limit, int offset)
     {
-        var rows = new List<RequestIdRow>();
+        var rows = new List<UsageRecord>();
 
         using var cmd = _conn.CreateCommand();
-        cmd.CommandText = "SELECT request_id, MAX(created_at) AS t FROM usage_log " +
-            "WHERE site_id=$site AND request_id <> ''" + BuildTypeFilter(cmd, types) +
-            " GROUP BY request_id ORDER BY t DESC, request_id ASC LIMIT " + limit + " OFFSET " + offset + ";";
+        string filter = BuildTypeFilter(cmd, types);
+        cmd.CommandText = "SELECT remote_id, created_at, type, model_name, token_name, group_name, quota, " +
+            "prompt_tokens, completion_tokens, cache_tokens, use_time, first_token_ms, speed_tps, is_stream, channel, " +
+            "upstream_model, request_id, content FROM (" +
+            "SELECT *, ROW_NUMBER() OVER (PARTITION BY request_id ORDER BY created_at DESC, log_key ASC) AS rn " +
+            "FROM usage_log WHERE site_id=$site AND request_id <> ''" + filter + ") " +
+            "WHERE rn = 1 ORDER BY created_at DESC, request_id ASC LIMIT " + limit + " OFFSET " + offset + ";";
         cmd.Parameters.AddWithValue("$site", siteId);
 
         using SqliteDataReader reader = cmd.ExecuteReader();
         while (reader.Read())
         {
-            rows.Add(new RequestIdRow
+            rows.Add(new UsageRecord
             {
-                RequestId = reader.GetString(0),
-                CreatedAt = reader.GetInt64(1),
                 SiteId = siteId,
+                RemoteId = reader.GetInt64(0),
+                CreatedAt = reader.GetInt64(1),
+                Type = reader.GetInt32(2),
+                ModelName = reader.GetString(3),
+                TokenName = reader.GetString(4),
+                GroupName = reader.GetString(5),
+                Quota = reader.GetInt64(6),
+                PromptTokens = reader.GetInt64(7),
+                CompletionTokens = reader.GetInt64(8),
+                CacheTokens = reader.GetInt64(9),
+                UseTime = reader.GetInt64(10),
+                FirstTokenMs = reader.GetInt64(11),
+                SpeedTps = reader.GetDouble(12),
+                IsStream = reader.GetInt64(13) != 0,
+                Channel = reader.GetInt64(14),
+                UpstreamModel = reader.GetString(15),
+                RequestId = reader.GetString(16),
+                Content = reader.GetString(17),
             });
         }
 
@@ -966,7 +977,8 @@ ON CONFLICT (site_id) DO UPDATE SET fetched_at=excluded.fetched_at, total_count=
 
         cmd.CommandText = "SELECT " + expression + " AS k, COUNT(*), COALESCE(SUM(quota),0), " +
             "COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), COALESCE(SUM(cache_tokens),0), " +
-            "COALESCE(SUM(prompt_tokens),0) + COALESCE(SUM(completion_tokens),0) + COALESCE(SUM(cache_tokens),0) " +
+            "COALESCE(SUM(prompt_tokens),0) + COALESCE(SUM(completion_tokens),0) + COALESCE(SUM(cache_tokens),0), " +
+            "COUNT(DISTINCT CASE WHEN request_id <> '' THEN request_id END) " +
             "FROM usage_log WHERE site_id=$site" + filter + " GROUP BY k " + order + tail + ";";
         cmd.Parameters.AddWithValue("$site", siteId);
 
@@ -982,6 +994,7 @@ ON CONFLICT (site_id) DO UPDATE SET fetched_at=excluded.fetched_at, total_count=
                 CompletionTokens = reader.GetInt64(4),
                 CacheTokens = reader.GetInt64(5),
                 Token = reader.GetInt64(6),
+                RequestIdCount = reader.GetInt64(7),
             });
         }
 

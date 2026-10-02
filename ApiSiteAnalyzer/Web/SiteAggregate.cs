@@ -29,6 +29,8 @@ public sealed class MergedRow
 
     /// <summary>缓存 token 合计。</summary>
     public long CacheTokens { get; set; }
+    /// <summary>已探明请求 ID 数（各站去重后相加）。</summary>
+    public long RequestIdCount { get; set; }
     /// <summary>三种 token 之和（输入 + 输出 + 缓存）——图表的排序与显示口径。</summary>
     public long Token
     {
@@ -333,6 +335,7 @@ public static class SiteAggregate
                     PromptTokens = row.PromptTokens,
                     CompletionTokens = row.CompletionTokens,
                     CacheTokens = row.CacheTokens,
+                    RequestIdCount = row.RequestIdCount,
                 });
                 continue;
             }
@@ -343,6 +346,7 @@ public static class SiteAggregate
             hit.PromptTokens += row.PromptTokens;
             hit.CompletionTokens += row.CompletionTokens;
             hit.CacheTokens += row.CacheTokens;
+            hit.RequestIdCount += row.RequestIdCount;
         }
     }
 
