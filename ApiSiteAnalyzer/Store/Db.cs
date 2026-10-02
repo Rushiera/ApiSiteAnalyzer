@@ -99,6 +99,8 @@ public sealed class WindowStat
 {
     /// <summary>窗口内记录条数。</summary>
     public long Count { get; set; }
+    /// <summary>窗口内额度合计（原始 quota——金额由 Web 层按该站换算比折算）。</summary>
+    public long Quota { get; set; }
 
     /// <summary>窗口内输入 token 合计。</summary>
     public long PromptTokens { get; set; }
@@ -605,7 +607,7 @@ ON CONFLICT (site_id) DO UPDATE SET fetched_at=excluded.fetched_at, total_count=
 
         return stat;
     }
-    /// <summary>按记录时刻的窗口统计（[from, to) 半开区间）——条数 / 三种 token / 去重请求 ID。</summary>
+    /// <summary>按记录时刻的窗口统计（[from, to) 半开区间）——条数 / 额度 / 三种 token / 去重请求 ID。</summary>
     /// <param name="siteId">站点键。</param>
     /// <param name="types">记录类型白名单（空 = 全部）。</param>
     /// <param name="from">窗口起点（Unix 秒，含）。</param>
@@ -617,10 +619,11 @@ ON CONFLICT (site_id) DO UPDATE SET fetched_at=excluded.fetched_at, total_count=
 
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = @"
-        SELECT COUNT(*), COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0),
-               COALESCE(SUM(cache_tokens),0),
-               COUNT(DISTINCT CASE WHEN request_id <> '' THEN request_id END)
-        FROM usage_log WHERE site_id=$site AND created_at >= $from AND created_at < $to" + BuildTypeFilter(cmd, types) + ";";
+            SELECT COUNT(*), COALESCE(SUM(quota),0), COALESCE(SUM(prompt_tokens),0),
+                   COALESCE(SUM(completion_tokens),0),
+                   COALESCE(SUM(cache_tokens),0),
+                   COUNT(DISTINCT CASE WHEN request_id <> '' THEN request_id END)
+            FROM usage_log WHERE site_id=$site AND created_at >= $from AND created_at < $to" + BuildTypeFilter(cmd, types) + ";";
         cmd.Parameters.AddWithValue("$site", siteId);
         cmd.Parameters.AddWithValue("$from", from);
         cmd.Parameters.AddWithValue("$to", to);
@@ -629,10 +632,11 @@ ON CONFLICT (site_id) DO UPDATE SET fetched_at=excluded.fetched_at, total_count=
         if (reader.Read())
         {
             stat.Count = reader.GetInt64(0);
-            stat.PromptTokens = reader.GetInt64(1);
-            stat.CompletionTokens = reader.GetInt64(2);
-            stat.CacheTokens = reader.GetInt64(3);
-            stat.RequestIdCount = reader.GetInt64(4);
+            stat.Quota = reader.GetInt64(1);
+            stat.PromptTokens = reader.GetInt64(2);
+            stat.CompletionTokens = reader.GetInt64(3);
+            stat.CacheTokens = reader.GetInt64(4);
+            stat.RequestIdCount = reader.GetInt64(5);
         }
 
         return stat;

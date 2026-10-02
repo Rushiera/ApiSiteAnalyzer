@@ -17,7 +17,7 @@
       "displayName": "New API 47.250.160.225",
       "baseUrl": "http://47.250.160.225:8443",
       "profileDir": "",
-      "quotaPerUnit": 500000,
+      "quotaPerUnit": 5000000,
       "currencySymbol": "¤"
     }
   ]

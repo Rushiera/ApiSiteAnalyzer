@@ -138,6 +138,10 @@ public sealed class AllSitesResult
 
     /// <summary>前 24 小时窗口统计（各站相加）——四项对比行的参照窗口。</summary>
     public WindowStat Prev24h { get; set; } = new WindowStat();
+    /// <summary>近 24 小时消费金额（各站按自己的换算比折算后相加）。</summary>
+    public double Last24hAmount { get; set; }
+    /// <summary>前 24 小时消费金额（各站按自己的换算比折算后相加）——对比行的参照值。</summary>
+    public double Prev24hAmount { get; set; }
 
     /// <summary>按模型（跨站合并，按 token 之和倒序）。</summary>
     public List<MergedRow> ByModel { get; set; } = new List<MergedRow>();
@@ -223,6 +227,9 @@ public static class SiteAggregate
             result.RequestIdCount += overview.RequestIdCount;
             result.Last24h = Add(result.Last24h, overview.Last24h);
             result.Prev24h = Add(result.Prev24h, overview.Prev24h);
+            // 窗口金额——各站按自己的换算比折算后相加（跨站 quota 单位不同，不能先加 quota 再除）
+            result.Last24hAmount += overview.Last24h.Quota / unit;
+            result.Prev24hAmount += overview.Prev24h.Quota / unit;
             symbols.Add(site.CurrencySymbol);
 
             // [段1] 分组行——各站取全量（limit=0）再合并，合并后按 token 之和倒序截断（截断放在合并之后，避免漏掉跨站前排）

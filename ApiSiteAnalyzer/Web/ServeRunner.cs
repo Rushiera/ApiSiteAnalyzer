@@ -533,8 +533,8 @@ public static class ServeRunner
                     prevAvgFirstTokenMs = overview.PrevAvgFirstTokenMs,
                     prevAvgUseTime = overview.PrevAvgUseTime,
                     prevAvgSpeedTps = overview.PrevAvgSpeedTps,
-                    last24h = MapWindow(overview.Last24h),
-                    prev24h = MapWindow(overview.Prev24h),
+                    last24h = MapWindow(overview.Last24h, overview.Last24h.Quota / unit),
+                    prev24h = MapWindow(overview.Prev24h, overview.Prev24h.Quota / unit),
                 },
                 byModel = byModel.Select(r => Map(r, unit)),
                 byDay = byDay.Select(r => Map(r, unit)),
@@ -811,8 +811,8 @@ public static class ServeRunner
                 prevAvgFirstTokenMs = all.PrevAvgFirstTokenMs,
                 prevAvgUseTime = all.PrevAvgUseTime,
                 prevAvgSpeedTps = all.PrevAvgSpeedTps,
-                last24h = MapWindow(all.Last24h),
-                prev24h = MapWindow(all.Prev24h),
+                last24h = MapWindow(all.Last24h, all.Last24hAmount),
+                prev24h = MapWindow(all.Prev24h, all.Prev24hAmount),
             },
             byModel = all.ByModel.Select(MapMerged),
             byDay = all.ByDay.Select(MapMerged),
@@ -858,14 +858,17 @@ public static class ServeRunner
         };
     }
 
-    /// <summary>把时间窗口统计映射成前端结构（命中率由输入 / 缓存现算——口径只在服务端定一次）。</summary>
+    /// <summary>把时间窗口统计映射成前端结构（命中率由输入 / 缓存现算，金额由调用方按站点换算比折算后传入——口径只在服务端定一次）。</summary>
     /// <param name="window">窗口统计。</param>
     /// <returns>前端结构。</returns>
-    private static object MapWindow(WindowStat window)
+    /// <param name="amount">窗口内折算金额（单站 = quota / 该站换算比；总览 = 各站折算后相加——调用方给，映射器不猜单位）。</param>
+    private static object MapWindow(WindowStat window, double amount)
     {
         return new
         {
             count = window.Count,
+            quota = window.Quota,
+            amount = amount,
             promptTokens = window.PromptTokens,
             completionTokens = window.CompletionTokens,
             cacheTokens = window.CacheTokens,

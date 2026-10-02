@@ -311,7 +311,7 @@
           <th>时间</th><th class="colsite">站点</th><th>类型</th><th>模型</th><th>令牌</th>
           <th class="num">额度</th><th class="num">金额</th>
           <th class="num">输入</th><th class="num">输出</th><th class="num">缓存</th>
-          <th class="num">t/s</th><th class="num">首字(ms)</th><th class="num">耗时(ms)</th><th>请求 ID</th>
+          <th class="num">t/s</th><th class="num">首字延迟(ms)</th><th class="num">耗时(ms)</th><th>请求 ID</th>
         </tr></thead>
         <tbody></tbody>
       </table>
@@ -556,26 +556,31 @@ function renderCards(o, sym){
   /* 对比行参照窗口——再往前十次（第 11–20 次）的样本数；不足即如实说明，不静默省略 */
   const pc = o.prevSampleCount || 0;
   /* 卡片条目：[标签, 值, 弹窗键?, 下方小字 HTML?]——第 4 项供「输入 Token」挂缓存小字、三个均值卡片挂对比行 */
+  /* 顺序（2026-10-02 显示口径轮 · 二轮）：已探明请求 ID 在 本地消费金额 之前 ·
+     本地记录数 换成 近 24 小时消费金额（带前 24 小时对比行）· 缓存命中率 在 缓存 Token 之前
+     消费金额取 mode='down'——花得少为绿（2026-10-02 三轮口径；用量四项仍 'up'） */
   const items = [
-    ['本地记录数', fmtNum(o.count)],
-    ['本地消费金额', fmtAmount(o.amount, sym)],
     ['已探明请求 ID', fmtNum(o.requestIdCount), 'requestIds'],
+    ['本地消费金额', fmtAmount(o.amount, sym)],
+    ['近 24 小时消费金额', fmtAmount(o.last24h.amount, sym), null,
+      delta24Line(o.last24h.amount, o.prev24h.amount, o.prev24h.count, fmtAmount(o.prev24h.amount, sym), 'down')],
     ['输入 Token', fmtNum(o.promptTokens), null, cacheLine(o)],
     ['输出 Token', fmtNum(o.completionTokens)],
-    ['缓存 Token', fmtNum(o.cacheTokens)],
     ['缓存命中率', (o.cacheHitRate*100).toFixed(1) + '%'],
-    [win + '平均首字', Math.round(o.recentAvgFirstTokenMs) + ' ms', null, deltaLine(o.recentAvgFirstTokenMs, o.prevAvgFirstTokenMs, pc, true, Math.round(o.prevAvgFirstTokenMs) + ' ms')],
+    ['缓存 Token', fmtNum(o.cacheTokens)],
+    [win + '平均首字延迟', Math.round(o.recentAvgFirstTokenMs) + ' ms', null, deltaLine(o.recentAvgFirstTokenMs, o.prevAvgFirstTokenMs, pc, true, Math.round(o.prevAvgFirstTokenMs) + ' ms')],
     [win + '平均耗时', fmtNum(Math.round(o.recentAvgUseTime*1000)) + ' ms', null, deltaLine(o.recentAvgUseTime, o.prevAvgUseTime, pc, true, fmtNum(Math.round(o.prevAvgUseTime*1000)) + ' ms')],
     [win + '平均速率', o.recentAvgSpeedTps.toFixed(1) + ' t/s', null, deltaLine(o.recentAvgSpeedTps, o.prevAvgSpeedTps, pc, false, o.prevAvgSpeedTps.toFixed(1) + ' t/s')],
-    /* 24 小时窗口四项——紧随「近十次平均速率」右侧；每项下方对比行给「前 24 小时 数值 + 正负百分比」 */
+    /* 24 小时窗口四项——紧随「近十次平均速率」右侧；每项下方对比行给「前 24 小时 数值 + 正负百分比」，
+       四项统一上色（mode='up'：涨绿跌红——与命中率的「越大越好」同一口径；消费金额另在首组，取 'down'） */
     ['近 24 小时输入 Token', fmtNum(o.last24h.promptTokens), null,
-      delta24Line(o.last24h.promptTokens, o.prev24h.promptTokens, o.prev24h.count, fmtNum(o.prev24h.promptTokens), 'flat')],
+      delta24Line(o.last24h.promptTokens, o.prev24h.promptTokens, o.prev24h.count, fmtNum(o.prev24h.promptTokens), 'up')],
     ['近 24 小时输出 Token', fmtNum(o.last24h.completionTokens), null,
-      delta24Line(o.last24h.completionTokens, o.prev24h.completionTokens, o.prev24h.count, fmtNum(o.prev24h.completionTokens), 'flat')],
+      delta24Line(o.last24h.completionTokens, o.prev24h.completionTokens, o.prev24h.count, fmtNum(o.prev24h.completionTokens), 'up')],
     ['近 24 小时缓存命中率', (o.last24h.cacheHitRate*100).toFixed(1) + '%', null,
       delta24Line(o.last24h.cacheHitRate, o.prev24h.cacheHitRate, o.prev24h.count, (o.prev24h.cacheHitRate*100).toFixed(1) + '%', 'up')],
     ['近 24 小时已探明请求 ID', fmtNum(o.last24h.requestIdCount), null,
-      delta24Line(o.last24h.requestIdCount, o.prev24h.requestIdCount, o.prev24h.count, fmtNum(o.prev24h.requestIdCount), 'flat')],
+      delta24Line(o.last24h.requestIdCount, o.prev24h.requestIdCount, o.prev24h.count, fmtNum(o.prev24h.requestIdCount), 'up')],
   ];
   $('cards').innerHTML = items.map(it =>
     '<div class="card' + (it[2] ? ' clickable' : '') + '"' + (it[2] ? ' data-key="' + it[2] + '"' : '') +
@@ -605,7 +610,8 @@ function deltaLine(cur, prev, prevCount, lowerBetter, prevText){
 }
 
 /* 24 小时卡片对比行（近 24 小时 vs 前 24 小时）：左「前 24 小时 + 具体数值」、右百分比——
-   mode：'up' 越大越好 / 'down' 越小越好 / 'flat' 中性（token 量级与请求数不判好坏，只给变化幅度）；
+   mode：'up' 越大越好（涨绿）/ 'down' 越小越好（跌绿）/ 'flat' 中性（不判好坏，只给幅度）——
+   2026-10-02 口径：用量四项取 'up'、消费金额取 'down'（花得少为绿）；'flat' 留作口径回退；
    前窗无记录或分母为 0 时如实说明（不静默省略，也不假报百分比） */
 function delta24Line(cur, prev, prevCount, prevText, mode){
   if(prevCount < 1) return '<div class="deltaline">前 24 小时 无记录</div>';
