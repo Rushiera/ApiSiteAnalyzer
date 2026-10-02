@@ -154,6 +154,9 @@ public sealed class AllSitesResult
     /// <summary>按小时（跨站合并，按小时升序）。</summary>
     public List<MergedRow> ByHour { get; set; } = new List<MergedRow>();
 
+    /// <summary>「当前」口径合计行——按天列表顶部「当前」行的数值（= 滚动 24 小时各小时行之和，与图同源）。</summary>
+    public MergedRow CurrentRow { get; set; } = new MergedRow { Name = "当前" };
+
     /// <summary>按令牌（跨站合并，按 token 之和倒序）。</summary>
     public List<MergedRow> ByToken { get; set; } = new List<MergedRow>();
 
@@ -207,7 +210,7 @@ public static class SiteAggregate
     /// <param name="sites">站点清单。</param>
     /// <param name="types">记录类型白名单（空 = 全部）。</param>
     /// <param name="balanceOf">按站点取最近一次探到的真实余额（quota 单位）。</param>
-    /// <param name="day">限定「按小时」的日期（yyyy-MM-dd；空 = 跨天累计）。</param>
+    /// <param name="day">限定「按小时」的日期（yyyy-MM-dd；空 = 「当前」滚动口径）。</param>
     /// <returns>跨站合并结果。</returns>
     public static AllSitesResult Build(Db db, IReadOnlyList<IApiSite> sites, IReadOnlyList<int> types, Func<string, long> balanceOf, string day = "")
     {
@@ -237,7 +240,10 @@ public static class SiteAggregate
             // [段1] 分组行——各站取全量（limit=0）再合并，合并后按 token 之和倒序截断（截断放在合并之后，避免漏掉跨站前排）
             Merge(result.ByModel, db.ByModel(site.Id, types, 0), unit);
             Merge(result.ByDay, db.ByDay(site.Id, types), unit);
-            Merge(result.ByHour, db.ByHour(site.Id, types, day), unit);
+            /* 「当前」口径（滚动 24 小时）恒算一次——按天列表顶部的「当前」行在选中某天时也要对，故不随 day 走 */
+            List<AggregateRow> hourCurrent = db.ByHour(site.Id, types, "");
+            Merge(result.ByHour, day.Length > 0 ? db.ByHour(site.Id, types, day) : hourCurrent, unit);
+            MergeTotal(result.CurrentRow, hourCurrent, unit);
             Merge(result.ByToken, db.ByToken(site.Id, types, 0), unit);
             Merge(result.ByGroup, db.ByGroup(site.Id, types, 0), unit);
 
@@ -347,6 +353,24 @@ public static class SiteAggregate
             hit.CompletionTokens += row.CompletionTokens;
             hit.CacheTokens += row.CacheTokens;
             hit.RequestIdCount += row.RequestIdCount;
+        }
+    }
+
+    /// <summary>把一站的一组聚合行**合计成一行**并入目标（各字段相加，额度按该站换算比折算成金额）——「当前」口径合计行用。</summary>
+    /// <param name="target">目标行。</param>
+    /// <param name="rows">该站的聚合行。</param>
+    /// <param name="unit">该站每货币单位 quota 数。</param>
+    private static void MergeTotal(MergedRow target, List<AggregateRow> rows, double unit)
+    {
+        foreach (AggregateRow row in rows)
+        {
+            target.Count += row.Count;
+            target.Quota += row.Quota;
+            target.Amount += row.Quota / unit;
+            target.PromptTokens += row.PromptTokens;
+            target.CompletionTokens += row.CompletionTokens;
+            target.CacheTokens += row.CacheTokens;
+            target.RequestIdCount += row.RequestIdCount;
         }
     }
 

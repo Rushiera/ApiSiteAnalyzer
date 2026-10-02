@@ -94,7 +94,7 @@
   @media (max-width:900px){.grid-dayhour{grid-template-columns:1fr}}
   /* 窄栏（按天）里的条形行——名字是 yyyy-MM-dd，值列也窄些 */
   .grid-dayhour .col-day .bar{grid-template-columns:84px 1fr 104px}
-  /* 按天行可点选——点某天 → 右侧只看那天；点顶部「当前」→ 回到跨天累计 */
+  /* 按天行可点选——点某天 → 右侧只看那天；点顶部「当前」→ 回到「当前」滚动口径 */
   .bar.clickable{cursor:pointer;border-radius:5px;padding:3px 5px;margin:2px -5px}
   .bar.clickable:hover{background:#1b2230}
   .bar.selected{background:#1d2735;box-shadow:inset 0 0 0 1px #2f4a6d}
@@ -203,6 +203,30 @@
   .idrow .idmeta b{color:var(--text);font-weight:600}
   .idrow .idcontent{margin-top:3px;color:var(--dim);font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere;
     max-height:3.6em;overflow:hidden}
+
+  /* 线程分析（弹窗内第二个视图）——按「上一轮输入+输出 == 下一轮输入（容差 5%）」串链；
+     并发轮标红并给原因。列表视图与它互斥显示，由「线程分析 / 返回列表」两个按钮切换 */
+  .threads{max-height:56vh;overflow:auto;border:1px solid var(--line);border-radius:8px}
+  .threadbox{padding:9px 11px;border-bottom:1px solid var(--line)}
+  .threadbox:last-child{border-bottom:none}
+  .threadbox .thead{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap}
+  .threadbox .tno{color:var(--dim);font-size:11px;min-width:34px;font-variant-numeric:tabular-nums}
+  .threadbox .tname{font-weight:600;font-size:12px}
+  .threadbox .tmeta{color:var(--dim);font-size:11px}
+  .threadbox .tflag{padding:1px 6px;border-radius:4px;background:#1e2632;color:var(--dim);font-size:11px}
+  .threadbox.concurrent .tflag{background:#3a1f24;color:#ff8a8a}
+  .threadbox .steps{margin-top:5px;display:flex;flex-direction:column;gap:3px}
+  .tstep{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap;font-size:12px;
+    padding:2px 6px;border-radius:5px;border-left:2px solid transparent}
+  .tstep.concurrent{border-left-color:var(--bad);background:#1d1517}
+  .tstep .sno{color:var(--dim);font-size:11px;min-width:26px;font-variant-numeric:tabular-nums}
+  .tstep .stime{color:var(--dim);font-size:11px;font-variant-numeric:tabular-nums;min-width:112px}
+  .tstep .stok{font-variant-numeric:tabular-nums}
+  .tstep .stok b{color:var(--text);font-weight:600}
+  .tstep .srid{font-family:Consolas,"Courier New",monospace;font-size:11px;color:var(--dim);
+    max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .tstep .sreason{color:#ff8a8a;font-size:11px}
+  .tempty{color:var(--dim);font-size:12px;padding:12px}
 </style>
 </head>
 <body>
@@ -267,9 +291,13 @@
       <h3>已探明请求 ID</h3>
       <div class="hint" id="idhint">读取中…</div>
       <div class="ids" id="idlist"></div>
+      <!-- 线程分析视图——与上面列表互斥显示（同一弹窗内切换，不另开弹窗） -->
+      <div class="threads" id="threadlist" style="display:none"></div>
       <div class="actions">
         <button id="btnIdMore">加载更多</button>
+        <button id="btnThread">线程分析</button>
         <div class="spacer"></div>
+        <button id="btnThreadBack" style="display:none">返回列表</button>
         <button id="btnIdClose">关闭</button>
       </div>
     </div>
@@ -367,7 +395,7 @@ let currentSite = '';
 let curSym = '';
 let timer = null;
 let siteMap = {};
-/* 按小时图的日期选择——空串 = 「当前」（跨天累计：今天的记录 + 今天还没到的时刻沿用历史）；否则只看那一天 */
+/* 按小时图的日期选择——空串 = 「当前」（滚动 24 小时：今天已过的时刻取今天、今天还没到的时刻取昨天）；否则只看那一天 */
 let selDay = '';
 /* 各站最近一次探到的真实余额（服务端按站点分开记，页面只做显示） */
 let balances = {};
@@ -388,9 +416,13 @@ function fmtMs(sec){ if(!sec) return '—'; return fmtNum(Math.round(Number(sec)
 function fmtTime(sec){ if(!sec) return '—'; const d=new Date(sec*1000); const p=n=>String(n).padStart(2,'0');
   return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds()); }
 function esc(s){ return String(s===null||s===undefined?'':s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-/* 今天的日期键（yyyy-MM-dd，本地时区）——与库内 strftime('%Y-%m-%d', ..., 'localtime') 同一口径 */
-function todayKey(){ const d = new Date(); const p = n => String(n).padStart(2,'0');
-  return d.getFullYear() + '-' + p(d.getMonth()+1) + '-' + p(d.getDate()); }
+/* 「当前」口径的时段说明——今天已过的时刻取今天、今天还没到的时刻取昨天（与服务端 Db.ByHour 的滚动口径同一规则）。
+   标题与悬停提示共用这一处，口径写在同一句话里，不让读者猜。 */
+function currentHourSpan(){
+  const h = new Date().getHours();
+  const hh = n => String(n).padStart(2, '0');
+  return h >= 23 ? '今天 00–23 时' : ('今天 00–' + hh(h) + ' 时 + 昨天 ' + hh(h + 1) + '–23 时');
+}
 
 function setStatus(text, kind){
   const el = $('status');
@@ -571,19 +603,16 @@ function renderBars(container, rows, opts){
   opts = opts || {};
   const el = $(container);
   if(!rows || !rows.length){ el.innerHTML = '<div class="muted">暂无数据</div>'; return; }
-  /* 按天列表顶部固定一行「当前」——点它回到跨天累计口径；数值取「今天」那一行（当前视图的主体就是今天） */
+  /* 按天列表顶部固定一行「当前」——点它回到「当前」口径（滚动 24 小时）；
+     数值由服务端给（= 该口径 24 个小时行之和，与右栏的图同源）——不拿「今天」那一行冒充：
+     选中某天时右栏只显示那一天，而这一行代表的始终是「当前」口径，故必须另取服务端合计 */
   let list = rows;
   if(opts.days){
-    let today = null;
-    const key = todayKey();
-    rows.forEach(r => { if(r.name === key){ today = r; } });
+    const c = opts.current || {name:'当前', token:0, count:0};
     /* 「当前」行要带全成分字段——堆叠条按成分画，只搬 token 会让它少画段 */
-    const cur = today
-      ? {name:'当前', token:today.token, count:today.count,
-         promptTokens:today.promptTokens, completionTokens:today.completionTokens, cacheTokens:today.cacheTokens,
-         requestIdCount:today.requestIdCount,
-         current:true}
-      : {name:'当前', token:0, count:0, current:true};
+    const cur = {name:'当前', token:c.token, count:c.count,
+      promptTokens:c.promptTokens, completionTokens:c.completionTokens, cacheTokens:c.cacheTokens,
+      requestIdCount:c.requestIdCount, current:true};
     list = [cur].concat(rows);
   }
   /* 条长口径——堆叠图按成分之和（= 输入 + 输出），其余图按 token 之和 */
@@ -603,7 +632,7 @@ function renderBars(container, rows, opts){
     const selected = opts.days && (r.current ? selDay === '' : selDay === r.name);
     const cls = 'bar' + (empty ? ' empty' : '') + (opts.days ? ' clickable' : '') + (selected ? ' selected' : '');
     const tip = opts.days
-      ? (r.current ? '当前视图：今天的记录 + 今天还没到的时刻沿用历史（跨天累计）' : ('只看 ' + r.name + ' 这一天的小时分布'))
+      ? (r.current ? ('当前视图：' + currentHourSpan() + '（今天已过的时刻取今天，今天还没到的时刻取昨天）') : ('只看 ' + r.name + ' 这一天的小时分布'))
       : r.name;
     /* 堆叠条——外层 .stack 宽度即条长，内层三段按 flex 值分宽（段值为 0 即不占宽）；
        非堆叠图仍走单色 .fill */
@@ -626,11 +655,11 @@ function renderBars(container, rows, opts){
   }).join('');
 }
 
-/* 按小时图的标题——选中某天 / 当前（跨天累计）两种口径必须写在标题上，不让读者猜 */
+/* 按小时图的标题——选中某天 / 「当前」滚动口径两种口径必须写在标题上（含具体时段），不让读者猜 */
 function renderHourTitle(){
   $('hourTitle').innerHTML = selDay
     ? '按小时分布 · ' + esc(selDay) + ' <span class="muted">（只看这一天）</span>'
-    : '按小时分布 <span class="muted">（当前：今天的记录 + 未到时刻沿用历史）</span>';
+    : '按小时分布 <span class="muted">（当前：' + esc(currentHourSpan()) + '）</span>';
 }
 
 /* 卡片键（按**默认顺序**）——拖拽排序的锚：与服务端 PanelSettings.DefaultCardOrder 同值，改名须同步两端。
@@ -852,7 +881,7 @@ async function loadAnalysis(){
   curSym = sym;
   renderCards(r.overview, sym);
   renderBars('byModel', r.byModel);
-  renderBars('byDay', r.byDay, {label: x => x.name, days: true, stack: true, idbar: true});
+  renderBars('byDay', r.byDay, {label: x => x.name, days: true, stack: true, idbar: true, current: r.current});
   renderBars('byHour', r.byHour, {label: x => x.name + ' 时', stack: true, idbar: true});
   renderHourTitle();
   renderBars('byToken', r.byToken);
@@ -1203,11 +1232,84 @@ function openRequestIds(){
   $('idlist').innerHTML = '';
   $('idhint').textContent = '读取中…';
   $('btnIdMore').disabled = true;
+  showIdList();
   $('idmask').className = 'mask show';
   loadRequestIds();
 }
 
 function closeRequestIds(){ $('idmask').className = 'mask'; }
+
+/* ---------- 线程分析（弹窗内第二个视图） ---------- */
+/* 口径：取最近 200 条记录（按当前站点与范围），按「上一轮输入 + 输出 == 下一轮输入（容差 5%）」串链；
+   并发两条判据——① 一轮在容差内有多个后继（分叉）；② 分属不同链的两轮输入在容差内重合（交叠）。
+   标记只活在本次分析里，不落库（需求定案：不落库）。 */
+/* 两个视图互斥——列表态与分析态各管一组控件显隐，切换只走这两个函数（不散在事件里） */
+function showIdList(){
+  $('idlist').style.display = '';
+  $('threadlist').style.display = 'none';
+  $('btnIdMore').style.display = '';
+  $('btnThread').style.display = '';
+  $('btnThreadBack').style.display = 'none';
+}
+function showThreads(){
+  $('idlist').style.display = 'none';
+  $('threadlist').style.display = '';
+  $('btnIdMore').style.display = 'none';
+  $('btnThread').style.display = 'none';
+  $('btnThreadBack').style.display = '';
+}
+
+function renderThreads(r){
+  const box = $('threadlist');
+  if(!r || !r.ok){
+    const msg = (r && r.error) || '接口无响应';
+    box.innerHTML = '<div class="tempty">读取失败：' + esc(msg) + '</div>';
+    return;
+  }
+  if(!r.chains || r.chains.length === 0){
+    box.innerHTML = '<div class="tempty">样本内没有记录可串链（样本 ' + fmtNum(r.sampleCount) + ' 条）。</div>';
+    return;
+  }
+
+  box.innerHTML = r.chains.map(c => {
+    const flag = c.hasConcurrent ? '<span class="tflag">含并发</span>' : '<span class="tflag">单线程</span>';
+    const meta = c.steps.length + ' 轮 · 链首输入 ' + fmtNum(c.steps[0].promptTokens);
+    const steps = c.steps.map(s => {
+      const reason = s.concurrent ? '<span class="sreason">并发：' + esc(s.concurrentReason) + '</span>' : '';
+      const site = isAll() ? '<span class="srid">' + esc(s.siteName || '—') + '</span>' : '';
+      return '<div class="tstep' + (s.concurrent ? ' concurrent' : '') + '">' +
+        '<span class="sno">#' + (s.index + 1) + '</span>' +
+        '<span class="stime">' + esc(fmtTime(s.createdAt)) + '</span>' +
+        '<span class="stok">输入 <b>' + fmtNum(s.promptTokens) + '</b></span>' +
+        '<span class="stok">输出 <b>' + fmtNum(s.completionTokens) + '</b></span>' +
+        '<span class="stok muted">→ 期望 ' + fmtNum(s.expectNext) + '</span>' +
+        '<span class="srid" title="' + esc(s.requestId) + '">' + esc(s.requestId || '—') + '</span>' +
+        site + reason +
+        '</div>';
+    }).join('');
+    return '<div class="threadbox' + (c.hasConcurrent ? ' concurrent' : '') + '">' +
+      '<div class="thead"><span class="tno">#' + (c.index + 1) + '</span>' +
+      '<span class="tname">线程链</span>' + flag +
+      '<span class="tmeta">' + esc(meta) + '</span></div>' +
+      '<div class="steps">' + steps + '</div>' +
+      '</div>';
+  }).join('');
+
+  const hint = '样本 ' + fmtNum(r.sampleCount) + '/' + fmtNum(r.sampleLimit) + ' 条 · 串出 ' +
+    fmtNum(r.chainCount) + ' 条链 · 并发轮 ' + fmtNum(r.concurrentStepCount) +
+    ' · 并发链 ' + fmtNum(r.concurrentChainCount) + '（容差 5% · 只分析不落库）';
+  $('idhint').textContent = hint;
+}
+
+async function loadThreadAnalysis(){
+  if(!currentSite) return;
+  showThreads();
+  $('threadlist').innerHTML = '<div class="tempty">分析中…</div>';
+  const url = '/api/thread-analysis?site=' + encodeURIComponent(currentSite) +
+    '&range=' + encodeURIComponent($('range').value);
+  const r = await fetch(url).then(x=>x.json()).catch(()=>null);
+  renderThreads(r);
+}
 
 function openSettings(){ $('mask').className = 'mask show'; }
 function closeSettings(){ $('mask').className = 'mask'; }
@@ -1223,7 +1325,7 @@ $('btnFetch').onclick = () => {
   clickTimer = setTimeout(() => { clickTimer = null; startFetch(false); }, 320);
 };
 $('range').onchange = loadAnalysis;
-/* 按天点选——点某天只看那天的小时分布；点顶部「当前」回到跨天累计（当前视图） */
+/* 按天点选——点某天只看那天的小时分布；点顶部「当前」回到「当前」滚动口径 */
 $('byDay').onclick = (e) => {
   const row = e.target.closest('.bar.clickable');
   if(!row) return;
@@ -1240,6 +1342,14 @@ $('btnFull').onclick = async () => { await saveSettings(); closeSettings(); awai
 
 /* 请求 ID 明细弹窗 */
 $('btnIdMore').onclick = loadRequestIds;
+$('btnThread').onclick = loadThreadAnalysis;
+/* 返回列表——分析视图改写过 hint，故整份列表重拉一次（不残留分析的提示口径） */
+$('btnThreadBack').onclick = () => {
+  showIdList();
+  idOffset = 0; idShown = 0;
+  $('idlist').innerHTML = '';
+  loadRequestIds();
+};
 $('btnIdClose').onclick = closeRequestIds;
 $('idmask').onclick = (e) => { if(e.target === $('idmask')) closeRequestIds(); };
 $('cards').onclick = (e) => {

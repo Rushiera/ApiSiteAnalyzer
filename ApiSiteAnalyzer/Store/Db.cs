@@ -779,30 +779,105 @@ ON CONFLICT (site_id) DO UPDATE SET fetched_at=excluded.fetched_at, total_count=
         return filled;
     }
 
-    /// <summary>按小时聚合（本地时区）。**空档补齐**——固定 00–23 全 24 行，无记录小时给 0 行。不给日期即跨天累计（「当前」视图口径）。</summary>
+    /// <summary>按小时聚合（本地时区）。**空档补齐**——固定 00–23 全 24 行，无记录小时给 0 行。不给日期即「当前」滚动口径（今天已过的时刻取今天、今天还没到的时刻取昨天）。</summary>
     /// <param name="siteId">站点键。</param>
     /// <param name="types">记录类型白名单。</param>
-    /// <param name="day">限定日期（yyyy-MM-dd，本地时区；空 = 跨天累计）。</param>
-    /// <returns>聚合行（按小时升序，Name = 00..23）。</returns>
+    /// <param name="day">限定日期（yyyy-MM-dd，本地时区；空 = 「当前」滚动口径）。</param>
+    /// <returns>聚合行（按小时升序，Name = 00..23；「当前」口径下近两天都无记录时为空表）。</returns>
     public List<AggregateRow> ByHour(string siteId, IReadOnlyList<int> types, string day = "")
     {
-        List<AggregateRow> rows = GroupByExpr(siteId, "strftime('%H', created_at, 'unixepoch', 'localtime')", types, 0, true, day);
-        /* 指定日期时必须铺满 00–23——那天没有记录也铺 0 行（横轴连续，不跳档）；
-           跨天累计无记录时保持空表（面板显示「暂无数据」，比 24 个空行清楚） */
-        if (rows.Count == 0 && day.Length == 0)
+        /* 指定日期——单日 00–23 聚合；「当前」口径——滚动 24 小时（今天已过的时刻取今天、未到的时刻取昨天） */
+        if (day.Length == 0)
         {
-            return rows;
+            return RollingByHour(siteId, types);
         }
 
-        // [段1] 已有行建索引——逐小时铺满，无记录小时补 0 行（空档补齐）
-        Dictionary<string, AggregateRow> known = new Dictionary<string, AggregateRow>(StringComparer.Ordinal);
+        List<AggregateRow> rows = GroupByExpr(siteId, "strftime('%H', created_at, 'unixepoch', 'localtime')", types, 0, true, day);
+        return FillHours(rows);
+    }
+    /// <summary>
+    /// 「当前」口径的小时聚合——**滚动 24 小时**：小时 h ≤ 当前小时取**今天**的记录，h &gt; 当前小时取**昨天**的记录。
+    /// 例：14 点时 00–14 时是今天的量、15–23 时是昨天的量。
+    /// 不跨天累计——把历史全部叠进同一小时会把「当前时段」的量放大成历史总和。
+    /// 近两天都无记录时返回空表（面板显示「暂无数据」，比 24 个空行清楚）。
+    /// </summary>
+    /// <param name="siteId">站点键。</param>
+    /// <param name="types">记录类型白名单。</param>
+    /// <returns>聚合行（按小时升序，Name = 00..23；近两天无记录时为空表）。</returns>
+    private List<AggregateRow> RollingByHour(string siteId, IReadOnlyList<int> types)
+    {
+        DateTime now = DateTime.Now;
+        string today = now.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        string yesterday = now.AddDays(-1).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        // [段0] 只扫近两天——窗口下界即本地昨天 00:00（created_at 是 Unix 秒）
+        long from = new DateTimeOffset(now.Date.AddDays(-1)).ToUnixTimeSeconds();
+
+        // [段1] 一次查出「日期 小时」二维分组的全部近两天记录
+        var byDayHour = new Dictionary<string, AggregateRow>(StringComparer.Ordinal);
+        using (var cmd = _conn.CreateCommand())
+        {
+            string filter = BuildTypeFilter(cmd, types);
+            cmd.CommandText = "SELECT strftime('%Y-%m-%d %H', created_at, 'unixepoch', 'localtime') AS k, COUNT(*), COALESCE(SUM(quota),0), " +
+                "COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), COALESCE(SUM(cache_tokens),0), " +
+                "COALESCE(SUM(prompt_tokens),0) + COALESCE(SUM(completion_tokens),0) + COALESCE(SUM(cache_tokens),0), " +
+                "COUNT(DISTINCT CASE WHEN request_id <> '' THEN request_id END) " +
+                "FROM usage_log WHERE site_id=$site AND created_at >= $from" + filter + " GROUP BY k;";
+            cmd.Parameters.AddWithValue("$site", siteId);
+            cmd.Parameters.AddWithValue("$from", from);
+
+            using SqliteDataReader reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                byDayHour[reader.GetString(0)] = new AggregateRow
+                {
+                    Count = reader.GetInt64(1),
+                    Quota = reader.GetInt64(2),
+                    PromptTokens = reader.GetInt64(3),
+                    CompletionTokens = reader.GetInt64(4),
+                    CacheTokens = reader.GetInt64(5),
+                    Token = reader.GetInt64(6),
+                    RequestIdCount = reader.GetInt64(7),
+                };
+            }
+        }
+
+        if (byDayHour.Count == 0)
+        {
+            return new List<AggregateRow>();
+        }
+
+        // [段2] 逐小时取数——已过的时刻认今天、未到的时刻认昨天；两天都没这一小时即铺 0 行（面板淡出）
+        var filled = new List<AggregateRow>();
+        for (int hour = 0; hour < 24; hour = hour + 1)
+        {
+            string key = hour.ToString("00", CultureInfo.InvariantCulture);
+            string source = (hour <= now.Hour ? today : yesterday) + " " + key;
+            AggregateRow? hit = null;
+            if (byDayHour.TryGetValue(source, out hit))
+            {
+                hit.Name = key;
+                filled.Add(hit);
+            }
+            else
+            {
+                filled.Add(new AggregateRow { Name = key });
+            }
+        }
+
+        return filled;
+    }
+    /// <summary>把「小时 → 聚合行」的查询结果铺成 00–23 全 24 行（无记录小时补 0 行——横轴连续，不跳档）。</summary>
+    /// <param name="rows">按小时聚合的行（Name = 两位小时）。</param>
+    /// <returns>铺满 24 行（按小时升序）。</returns>
+    private static List<AggregateRow> FillHours(List<AggregateRow> rows)
+    {
+        var known = new Dictionary<string, AggregateRow>(StringComparer.Ordinal);
         foreach (AggregateRow row in rows)
         {
             known[row.Name] = row;
         }
 
-        // [段2] 00–23 全 24 行
-        List<AggregateRow> filled = new List<AggregateRow>();
+        var filled = new List<AggregateRow>();
         for (int hour = 0; hour < 24; hour = hour + 1)
         {
             string key = hour.ToString("00", CultureInfo.InvariantCulture);
@@ -818,6 +893,26 @@ ON CONFLICT (site_id) DO UPDATE SET fetched_at=excluded.fetched_at, total_count=
         }
 
         return filled;
+    }
+    /// <summary>把一组聚合行合并成一行（各字段相加）——按天列表顶部「当前」行的合计用它（= 该视图 24 个小时行之和）。</summary>
+    /// <param name="rows">聚合行。</param>
+    /// <param name="name">合并行的名称。</param>
+    /// <returns>合并行（空序列给全 0 行）。</returns>
+    public static AggregateRow SumRows(IReadOnlyList<AggregateRow> rows, string name)
+    {
+        var total = new AggregateRow { Name = name };
+        foreach (AggregateRow row in rows)
+        {
+            total.Count += row.Count;
+            total.Quota += row.Quota;
+            total.PromptTokens += row.PromptTokens;
+            total.CompletionTokens += row.CompletionTokens;
+            total.CacheTokens += row.CacheTokens;
+            total.Token += row.Token;
+            total.RequestIdCount += row.RequestIdCount;
+        }
+
+        return total;
     }
 
     /// <summary>按分组聚合。</summary>

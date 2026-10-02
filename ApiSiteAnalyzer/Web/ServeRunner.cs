@@ -521,7 +521,9 @@ public static class ServeRunner
             OverviewStat overview = db.Overview(site.Id, types);
             List<AggregateRow> byModel = db.ByModel(site.Id, types, 30);
             List<AggregateRow> byDay = db.ByDay(site.Id, types);
-            List<AggregateRow> byHour = db.ByHour(site.Id, types, day);
+            /* 「当前」口径（滚动 24 小时）恒算一次——按天列表顶部的「当前」行在选中某天时也要对，故不随 day 走 */
+            List<AggregateRow> byHourCurrent = db.ByHour(site.Id, types, "");
+            List<AggregateRow> byHour = day.Length > 0 ? db.ByHour(site.Id, types, day) : byHourCurrent;
             List<AggregateRow> byToken = db.ByToken(site.Id, types, 20);
             List<AggregateRow> byGroup = db.ByGroup(site.Id, types, 20);
             List<UsageRecord> recent = db.Recent(site.Id, types, 50);
@@ -556,6 +558,7 @@ public static class ServeRunner
                 byModel = byModel.Select(r => Map(r, unit)),
                 byDay = byDay.Select(r => Map(r, unit)),
                 byHour = byHour.Select(r => Map(r, unit)),
+                current = Map(Db.SumRows(byHourCurrent, "当前"), unit),
                 byToken = byToken.Select(r => Map(r, unit)),
                 byGroup = byGroup.Select(r => Map(r, unit)),
                 recent = recent.Select(r => MapRecent(r, site.DisplayName, unit)),
@@ -641,6 +644,40 @@ public static class ServeRunner
                 limit = limit,
                 items = items.Select(r => MapRecent(r, site.DisplayName, siteUnit)),
             });
+        });
+
+        // [段7c] 线程分析——取最近 200 条串链并标并发（**只分析不落库**——标记是运行时结论，不进 SQLite）
+        app.MapGet("/api/thread-analysis", (HttpContext context) =>
+        {
+            string siteId = context.Request.Query["site"].ToString();
+
+            string range = context.Request.Query["range"].ToString();
+            if (range.Length == 0)
+            {
+                range = "consume";
+            }
+
+            int[] types = range switch
+            {
+                "all" => Array.Empty<int>(),
+                "consume" => new[] { 2 },
+                _ => new[] { 2 },
+            };
+
+            if (!IsAllSites(siteId))
+            {
+                IApiSite? only = FindSite(sites, siteId);
+                if (only is null)
+                {
+                    return Results.Json(new { ok = false, error = "未知站点：" + siteId });
+                }
+
+                ThreadAnalysisResult one = BuildThreadAnalysis(dbPath, new List<IApiSite> { only }, types);
+                return Results.Json(MapThreadAnalysis(one));
+            }
+
+            ThreadAnalysisResult merged = BuildThreadAnalysis(dbPath, sites, types);
+            return Results.Json(MapThreadAnalysis(merged));
         });
 
         // [段8] 启动浏览器并打地址
@@ -780,7 +817,7 @@ public static class ServeRunner
     /// <param name="sites">站点清单。</param>
     /// <param name="types">记录类型白名单（空 = 全部）。</param>
     /// <param name="state">面板运行态（取各站最近一次探到的真实余额）。</param>
-    /// <param name="day">限定「按小时」的日期（yyyy-MM-dd；空 = 跨天累计）。</param>
+    /// <param name="day">限定「按小时」的日期（yyyy-MM-dd；空 = 「当前」滚动口径）。</param>
     /// <returns>响应对象。</returns>
     private static object BuildAllSitesAnalysis(string dbPath, List<IApiSite> sites, int[] types, PanelState state, string day)
     {
@@ -826,6 +863,7 @@ public static class ServeRunner
             byModel = all.ByModel.Select(MapMerged),
             byDay = all.ByDay.Select(MapMerged),
             byHour = all.ByHour.Select(MapMerged),
+            current = MapMerged(all.CurrentRow),
             byToken = all.ByToken.Select(MapMerged),
             byGroup = all.ByGroup.Select(MapMerged),
             recent = all.Recent.Select(r => MapRecent(r, DisplayNameOf(sites, r.SiteId), UnitOf(blocks, r.SiteId))),
@@ -959,6 +997,91 @@ public static class ServeRunner
             requestId = record.RequestId,
             upstreamModel = record.UpstreamModel,
             content = record.Content,
+        };
+    }
+    /// <summary>
+    /// 组装线程分析结果——取最近 N 条记录（按时刻升序）串链并标并发。
+    /// 总览（跨站合并）先各站取最近 N 条再合并取前 N 条——跨站前 N 条必在各站前 N 条之内，故不漏。
+    /// </summary>
+    /// <param name="dbPath">库文件路径。</param>
+    /// <param name="sites">站点清单。</param>
+    /// <param name="types">记录类型白名单。</param>
+    /// <returns>线程分析结果（链清单 + 并发统计）。</returns>
+    private static ThreadAnalysisResult BuildThreadAnalysis(string dbPath, List<IApiSite> sites, int[] types)
+    {
+        var sample = new List<UsageRecord>();
+
+        using (var db = new Db(dbPath))
+        {
+            if (sites.Count == 1 && !IsAllSites(sites[0].Id))
+            {
+                sample.AddRange(db.Recent(sites[0].Id, types, ThreadAnalyzer.SampleLimit));
+            }
+            else
+            {
+                foreach (IApiSite site in sites)
+                {
+                    sample.AddRange(db.Recent(site.Id, types, ThreadAnalyzer.SampleLimit));
+                }
+            }
+        }
+
+        // [段1] 升序化——串链按时间推进，样本必须是时刻升序（Db.Recent 给的是倒序）
+        sample.Sort((left, right) =>
+        {
+            int byTime = left.CreatedAt.CompareTo(right.CreatedAt);
+            if (byTime != 0)
+            {
+                return byTime;
+            }
+
+            int byRemote = left.RemoteId.CompareTo(right.RemoteId);
+            if (byRemote != 0)
+            {
+                return byRemote;
+            }
+
+            return string.CompareOrdinal(left.SiteId, right.SiteId);
+        });
+
+        if (sample.Count > ThreadAnalyzer.SampleLimit)
+        {
+            sample = sample.Skip(sample.Count - ThreadAnalyzer.SampleLimit).ToList();
+        }
+
+        return ThreadAnalyzer.Analyze(sample, siteId => DisplayNameOf(sites, siteId));
+    }
+    /// <summary>把线程分析结果映射成前端结构（链 / 轮 / 并发标记同源一份形状）。</summary>
+    /// <param name="result">分析结果。</param>
+    /// <returns>前端结构。</returns>
+    private static object MapThreadAnalysis(ThreadAnalysisResult result)
+    {
+        return new
+        {
+            ok = true,
+            sampleCount = result.SampleCount,
+            sampleLimit = result.SampleLimit,
+            chainCount = result.ChainCount,
+            concurrentStepCount = result.ConcurrentStepCount,
+            concurrentChainCount = result.ConcurrentChainCount,
+            chains = result.Chains.Select(chain => new
+            {
+                index = chain.Index,
+                hasConcurrent = chain.HasConcurrent,
+                steps = chain.Steps.Select(step => new
+                {
+                    index = step.Index,
+                    createdAt = step.CreatedAt,
+                    promptTokens = step.PromptTokens,
+                    completionTokens = step.CompletionTokens,
+                    expectNext = step.ExpectNext,
+                    requestId = step.RequestId,
+                    modelName = step.ModelName,
+                    siteName = step.SiteName,
+                    concurrent = step.Concurrent,
+                    concurrentReason = step.ConcurrentReason,
+                }),
+            }),
         };
     }
 
