@@ -75,7 +75,7 @@
   .bar .seg.miss{background:#e57e73}
   .bar .seg.cache{background:var(--gold)}
   .bar .seg.out{background:#4f9cf9}
-  /* 条形成分图例——标在按天 / 按小时那一组上方（色块与条内分段同源） */
+  /* 条形成分图例——标在按天栏顶部（与右侧「按小时分布」标题同一水平行；色块与条内分段同源） */
   .legend{display:flex;gap:12px;flex-wrap:wrap;align-items:center;color:var(--dim);font-size:11px;margin:0 0 8px}
   .legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:-1px}
   .legend .miss{background:#e57e73}
@@ -299,16 +299,17 @@
 
   <div class="cards" id="cards"></div>
 
-  <div class="legend">
-    <span>条形成分：</span>
-    <span><i class="miss"></i>未命中输入</span>
-    <span><i class="cache"></i>缓存</span>
-    <span><i class="out"></i>输出</span>
-    <span><i class="rid"></i>已探明请求 ID（各自比）</span>
-  </div>
-
   <div class="grid-dayhour">
     <section class="col-day">
+      <!-- 条形成分图例——按天栏顶部一行（与右侧「按小时分布」标题同一水平行）；
+           它占了首位，按天标题被顶到下方——两栏标题因此不在同一水平线 -->
+      <div class="legend">
+        <span>条形成分：</span>
+        <span><i class="miss"></i>未命中输入</span>
+        <span><i class="cache"></i>缓存</span>
+        <span><i class="out"></i>输出</span>
+        <span><i class="rid"></i>已探明请求 ID（各自比）</span>
+      </div>
       <h2>按天 <span class="muted">· 点选看当天小时分布</span></h2>
       <div class="bars" id="byDay"></div>
     </section>
