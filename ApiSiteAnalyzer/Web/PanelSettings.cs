@@ -55,14 +55,18 @@ public sealed class PanelSettings
     public List<string> CardOrder { get; set; } = new List<string>(DefaultCardOrder);
 
     /// <summary>
-    /// 卡片键默认顺序——与面板 `renderCards` 的 items 顺序**同值**（新增卡片须同步两端；
-    /// 键名与前端常量同为这套字符串，改名时先 grep 两端）。
+    /// 卡片键默认顺序——与面板 `CARD_KEYS` 常量**同值同序**（新增 / 改名 / 改序须同步两端；
+    /// 键名与前端常量同为这套字符串，改时先 grep 两端）。
+    /// 现行顺序（2026-10-02 Rushiera 排定 · v0.15.3）：
+    /// 已探明请求 ID → 本地消费金额 → 近十次平均首字延迟 → 近十次平均耗时 → 输出 Token → 输入 Token →
+    /// 缓存命中率 → 近 24 小时已探明请求 ID → 近 24 小时消费金额 → 近十次平均速率 → 缓存 Token →
+    /// 近 24 小时输出 Token → 近 24 小时输入 Token → 近 24 小时缓存命中率
     /// </summary>
     public static readonly string[] DefaultCardOrder =
     {
-        "requestIds", "amount", "amount24h", "promptTokens", "completionTokens",
-        "cacheHitRate", "cacheTokens", "avgFirstToken", "avgUseTime", "avgSpeed",
-        "prompt24h", "completion24h", "cacheHitRate24h", "requestIds24h",
+        "requestIds", "amount", "avgFirstToken", "avgUseTime", "completionTokens",
+        "promptTokens", "cacheHitRate", "requestIds24h", "amount24h", "avgSpeed",
+        "cacheTokens", "completion24h", "prompt24h", "cacheHitRate24h",
     };
 
     /// <summary>判断卡片键是否已知（未知键一律拒绝——入口面零容忍）。</summary>

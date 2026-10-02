@@ -634,10 +634,12 @@ function renderHourTitle(){
 }
 
 /* 卡片键（按**默认顺序**）——拖拽排序的锚：与服务端 PanelSettings.DefaultCardOrder 同值，改名须同步两端。
-   顺序表按索引对应 renderCards 的 items（二者相邻，改一处即改另一处）；顺序存 data/settings.json（服务端） */
-const CARD_KEYS = ['requestIds', 'amount', 'amount24h', 'promptTokens', 'completionTokens',
-  'cacheHitRate', 'cacheTokens', 'avgFirstToken', 'avgUseTime', 'avgSpeed',
-  'prompt24h', 'completion24h', 'cacheHitRate24h', 'requestIds24h'];
+   顺序表按索引对应 renderCards 的 items（二者相邻，改一处即改另一处）；顺序存 data/settings.json（服务端）
+   默认顺序（2026-10-02 Rushiera 排定 · v0.15.3）：已探明 → 本地消费 → 近十次首字 → 近十次耗时 →
+   输出 → 输入 → 缓存命中率 → 近 24 已探明 → 近 24 消费 → 近十次速率 → 缓存 → 近 24 输出 → 近 24 输入 → 近 24 缓存率 */
+const CARD_KEYS = ['requestIds', 'amount', 'avgFirstToken', 'avgUseTime', 'completionTokens',
+  'promptTokens', 'cacheHitRate', 'requestIds24h', 'amount24h', 'avgSpeed',
+  'cacheTokens', 'completion24h', 'prompt24h', 'cacheHitRate24h'];
 
 function renderCards(o, sym){
   const n = o.recentSampleCount || 0;
@@ -646,32 +648,34 @@ function renderCards(o, sym){
   const pc = o.prevSampleCount || 0;
   /* 卡片条目：[标签, 值, 弹窗键?, 下方小字 HTML?]——第 3 项供「已探明请求 ID」挂点击弹窗，第 4 项供「输入 Token」挂缓存小字、三个均值卡片挂对比行
      条目按默认顺序给出（下标即 CARD_KEYS 的下标）——显示顺序由下面那次重排决定，勿在此处调顺序 */
-  /* 顺序（2026-10-02 显示口径轮 · 二轮）：已探明请求 ID 在 本地消费金额 之前 ·
-     本地记录数 换成 近 24 小时消费金额（带前 24 小时对比行）· 缓存命中率 在 缓存 Token 之前
-           消费金额取 mode='down'——花得少为绿（2026-10-02 三轮口径；用量四项仍 'up'）
-      ⚠ 这是**默认顺序**——用户拖拽排定的顺序在服务端（data/settings.json），按 cardOrder 重排后输出 */
+  /* 默认顺序（2026-10-02 Rushiera 排定 · v0.15.3）：
+     已探明请求 ID → 本地消费金额 → 近十次平均首字延迟 → 近十次平均耗时 → 输出 Token → 输入 Token →
+     缓存命中率 → 近 24 小时已探明请求 ID → 近 24 小时消费金额 → 近十次平均速率 → 缓存 Token →
+     近 24 小时输出 Token → 近 24 小时输入 Token → 近 24 小时缓存命中率
+     消费金额取 mode='down'——花得少为绿（2026-10-02 三轮口径；用量四项仍 'up'）
+     ⚠ items 的下标必须与上方 CARD_KEYS 逐项对应——改顺序动两处，不动这里 */
   const items = [
     ['已探明请求 ID', fmtNum(o.requestIdCount), 'requestIds'],
     ['本地消费金额', fmtAmount(o.amount, sym)],
-    ['近 24 小时消费金额', fmtAmount(o.last24h.amount, sym), null,
-      delta24Line(o.last24h.amount, o.prev24h.amount, o.prev24h.count, fmtAmount(o.prev24h.amount, sym), 'down')],
-    ['输入 Token', fmtNum(o.promptTokens), null, cacheLine(o)],
-    ['输出 Token', fmtNum(o.completionTokens)],
-    ['缓存命中率', (o.cacheHitRate*100).toFixed(1) + '%'],
-    ['缓存 Token', fmtNum(o.cacheTokens)],
     [win + '平均首字延迟', Math.round(o.recentAvgFirstTokenMs) + ' ms', null, deltaLine(o.recentAvgFirstTokenMs, o.prevAvgFirstTokenMs, pc, true, Math.round(o.prevAvgFirstTokenMs) + ' ms')],
     [win + '平均耗时', fmtNum(Math.round(o.recentAvgUseTime*1000)) + ' ms', null, deltaLine(o.recentAvgUseTime, o.prevAvgUseTime, pc, true, fmtNum(Math.round(o.prevAvgUseTime*1000)) + ' ms')],
-    [win + '平均速率', o.recentAvgSpeedTps.toFixed(1) + ' t/s', null, deltaLine(o.recentAvgSpeedTps, o.prevAvgSpeedTps, pc, false, o.prevAvgSpeedTps.toFixed(1) + ' t/s')],
-    /* 24 小时窗口四项——紧随「近十次平均速率」右侧；每项下方对比行给「前 24 小时 数值 + 正负百分比」，
-       四项统一上色（mode='up'：涨绿跌红——与命中率的「越大越好」同一口径；消费金额另在首组，取 'down'） */
-    ['近 24 小时输入 Token', fmtNum(o.last24h.promptTokens), null,
-      delta24Line(o.last24h.promptTokens, o.prev24h.promptTokens, o.prev24h.count, fmtNum(o.prev24h.promptTokens), 'up')],
-    ['近 24 小时输出 Token', fmtNum(o.last24h.completionTokens), null,
-      delta24Line(o.last24h.completionTokens, o.prev24h.completionTokens, o.prev24h.count, fmtNum(o.prev24h.completionTokens), 'up')],
-    ['近 24 小时缓存命中率', (o.last24h.cacheHitRate*100).toFixed(1) + '%', null,
-      delta24Line(o.last24h.cacheHitRate, o.prev24h.cacheHitRate, o.prev24h.count, (o.prev24h.cacheHitRate*100).toFixed(1) + '%', 'up')],
+    ['输出 Token', fmtNum(o.completionTokens)],
+    ['输入 Token', fmtNum(o.promptTokens), null, cacheLine(o)],
+    ['缓存命中率', (o.cacheHitRate*100).toFixed(1) + '%'],
     ['近 24 小时已探明请求 ID', fmtNum(o.last24h.requestIdCount), null,
       delta24Line(o.last24h.requestIdCount, o.prev24h.requestIdCount, o.prev24h.count, fmtNum(o.prev24h.requestIdCount), 'up')],
+    ['近 24 小时消费金额', fmtAmount(o.last24h.amount, sym), null,
+      delta24Line(o.last24h.amount, o.prev24h.amount, o.prev24h.count, fmtAmount(o.prev24h.amount, sym), 'down')],
+    [win + '平均速率', o.recentAvgSpeedTps.toFixed(1) + ' t/s', null, deltaLine(o.recentAvgSpeedTps, o.prevAvgSpeedTps, pc, false, o.prevAvgSpeedTps.toFixed(1) + ' t/s')],
+    ['缓存 Token', fmtNum(o.cacheTokens)],
+    /* 24 小时窗口三项——每项下方对比行给「前 24 小时 数值 + 正负百分比」，
+       统一上色（mode='up'：涨绿跌红——与命中率的「越大越好」同一口径；消费金额另在首组，取 'down'） */
+    ['近 24 小时输出 Token', fmtNum(o.last24h.completionTokens), null,
+      delta24Line(o.last24h.completionTokens, o.prev24h.completionTokens, o.prev24h.count, fmtNum(o.prev24h.completionTokens), 'up')],
+    ['近 24 小时输入 Token', fmtNum(o.last24h.promptTokens), null,
+      delta24Line(o.last24h.promptTokens, o.prev24h.promptTokens, o.prev24h.count, fmtNum(o.prev24h.promptTokens), 'up')],
+    ['近 24 小时缓存命中率', (o.last24h.cacheHitRate*100).toFixed(1) + '%', null,
+      delta24Line(o.last24h.cacheHitRate, o.prev24h.cacheHitRate, o.prev24h.count, (o.prev24h.cacheHitRate*100).toFixed(1) + '%', 'up')],
   ];
   /* 最近一次卡片的渲染入参——拖拽改序后据此**原样重渲染**（不重拉分析接口：改顺序不该动数据） */
   lastCards = { o: o, sym: sym };
