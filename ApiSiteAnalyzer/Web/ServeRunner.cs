@@ -875,7 +875,7 @@ public static class ServeRunner
     /// <returns>前端结构。</returns>
     private static object Map(AggregateRow row, double unit)
     {
-        return MapRow(row.Name, row.Count, row.Quota, row.Quota / unit, row.PromptTokens, row.CompletionTokens, row.CacheTokens, row.Token);
+        return MapRow(row.Name, row.Count, row.Quota, row.Quota / unit, row.PromptTokens, row.CompletionTokens, row.CacheTokens, row.Token, row.RequestIdCount);
     }
 
     /// <summary>把跨站合并行映射成前端结构（金额已在合并时按各站换算比折算）。</summary>
@@ -883,7 +883,7 @@ public static class ServeRunner
     /// <returns>前端结构。</returns>
     private static object MapMerged(MergedRow row)
     {
-        return MapRow(row.Name, row.Count, row.Quota, row.Amount, row.PromptTokens, row.CompletionTokens, row.CacheTokens, row.Token);
+        return MapRow(row.Name, row.Count, row.Quota, row.Amount, row.PromptTokens, row.CompletionTokens, row.CacheTokens, row.Token, row.RequestIdCount);
     }
 
     /// <summary>聚合行的前端结构（单站与总览共用同一份形状——两处各写一份必漂移）。</summary>
@@ -895,6 +895,7 @@ public static class ServeRunner
     /// <param name="completionTokens">输出 token。</param>
     /// <param name="cacheTokens">缓存 token。</param>
     /// <param name="token">三种 token 之和（输入 + 输出 + 缓存）——图表的排序与显示口径。</param>
+    /// <param name="requestIdCount">已探明请求 ID 数（去重）。</param>
     /// <returns>前端结构。</returns>
     private static object MapRow(string name, long count, long quota, double amount, long promptTokens, long completionTokens, long cacheTokens, long token, long requestIdCount)
     {
@@ -908,6 +909,7 @@ public static class ServeRunner
             completionTokens = completionTokens,
             cacheTokens = cacheTokens,
             token = token,
+            requestIdCount = requestIdCount,
         };
     }
 
