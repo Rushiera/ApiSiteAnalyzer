@@ -129,6 +129,7 @@ public static class Program
     private static async Task<int> RunCheckAsync(List<IApiSite> sites, string chromePath, string dataDir, CancellationToken ct)
     {
         var hub = new BrowserHub(chromePath, Path.Combine(dataDir, "browsers.json"));
+        hub.Silent = ReadSilentSetting(dataDir);
         var session = new SiteSession(hub);
 
         int notLoggedIn = 0;
@@ -161,6 +162,7 @@ public static class Program
     private static async Task<int> RunFetchAsync(List<IApiSite> sites, string chromePath, string dataDir, bool incremental, CancellationToken ct)
     {
         var hub = new BrowserHub(chromePath, Path.Combine(dataDir, "browsers.json"));
+        hub.Silent = ReadSilentSetting(dataDir);
         var session = new SiteSession(hub);
 
         using var db = new Db(Path.Combine(dataDir, "usage.db"));
@@ -238,6 +240,15 @@ public static class Program
         }
 
         return 0;
+    }
+
+    /// <summary>读面板设置里的静默采集开关（无设置文件 = 默认静默）——CLI 与面板走同一份设置。</summary>
+    /// <param name="dataDir">数据目录。</param>
+    /// <returns>是否静默（headless）。</returns>
+    private static bool ReadSilentSetting(string dataDir)
+    {
+        var settings = new PanelSettings(Path.Combine(dataDir, "settings.json"));
+        return settings.Silent;
     }
 
     /// <summary>未知子命令——出声并非零退出。</summary>

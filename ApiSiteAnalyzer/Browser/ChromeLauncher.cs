@@ -16,24 +16,29 @@ public static class ChromeLauncher
     /// <summary>chrome 在 stderr 里报告调试端点的标记。</summary>
     private const string EndpointMarker = "DevTools listening on ";
 
-    /// <summary>启动 headless 临时实例。</summary>
+    /// <summary>
+    /// 启动 headless 实例——**静默采集**用（无窗口），调试端口与登录态载体（用户目录）与可见模式完全一致。
+    /// `--window-size` 给出虚拟视口：站点是 SPA，视口过小会走懒加载分支。
+    /// </summary>
     /// <param name="chromePath">chrome.exe 路径。</param>
     /// <param name="profileDir">浏览器用户数据目录。</param>
+    /// <param name="url">打开的地址。</param>
     /// <param name="timeoutMs">等待调试端点的超时（毫秒）。</param>
     /// <param name="ct">取消令牌。</param>
     /// <returns>已启动进程 + 调试端口。</returns>
-    public static Task<ChromeProcess> StartHeadlessAsync(string chromePath, string profileDir, int timeoutMs, CancellationToken ct)
+    public static Task<ChromeProcess> StartHeadlessAsync(string chromePath, string profileDir, string url, int timeoutMs, CancellationToken ct)
     {
         var args = new List<string>
         {
             "--headless=new",
             "--disable-gpu",
+            "--window-size=1440,900",
             "--no-first-run",
             "--no-default-browser-check",
             "--remote-debugging-port=0",
             "--remote-allow-origins=*",
             "--user-data-dir=" + profileDir,
-            "about:blank",
+            url,
         };
 
         return StartAsync(chromePath, args, timeoutMs, ct);

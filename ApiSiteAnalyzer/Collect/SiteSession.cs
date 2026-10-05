@@ -278,7 +278,8 @@ public sealed class SiteSession
 
     /// <summary>
     /// 打开登录页——**在通道标签页里导航**（钩子已就位，登录响应里的 access_token 会被页面内钩子捕获并留在页面里）。
-    /// 窗口是可见的，用户就在这个标签页里登录；登录完直接点「检查登录」即可。
+    /// **强制可见窗口**：静默模式下受控实例是 headless，这里换成窗口实例（停旧起新）——登录归人，人得看得见。
+    /// 登录完点「检查登录」，那时再按设置切回静默。
     /// </summary>
     /// <param name="site">站点适配器。</param>
     /// <param name="ct">取消令牌。</param>
@@ -291,7 +292,7 @@ public sealed class SiteSession
             throw new InvalidOperationException("该站点走 API key 直连通道，不需要浏览器登录");
         }
 
-        (BrowserInstance instance, _) = await _hub.EnsureAsync(site.ProfileDir, site.BaseUrl, ct).ConfigureAwait(false);
+        (BrowserInstance instance, _) = await _hub.EnsureWindowAsync(site.ProfileDir, site.BaseUrl, ct).ConfigureAwait(false);
 
         CdpSession session = await OpenSessionAsync(site, ct).ConfigureAwait(false);
         await using (session)
@@ -301,6 +302,44 @@ public sealed class SiteSession
         }
 
         return instance;
+    }
+
+    /// <summary>
+    /// 切回静默模式——登录完成后调用：当前实例是可见窗口且设置为静默时，换成 headless 实例并复探登录态。
+    /// 登录态存在浏览器用户目录里，换实例不影响它；复探是让「切回静默」这一步本身可验证（失败如实上报）。
+    /// </summary>
+    /// <param name="site">站点适配器。</param>
+    /// <param name="ct">取消令牌。</param>
+    /// <returns>是否发生切换 + 切换后的登录态（未切换时为 null）。</returns>
+    public async Task<(bool Switched, LoginState? Login)> SwitchToSilentAsync(IApiSite site, CancellationToken ct)
+    {
+        // [段0] 直连站没有浏览器实例这回事
+        if (site is NewApiSite direct && direct.ApiKey.Length > 0)
+        {
+            return (false, null);
+        }
+
+        // [段1] 非静默模式——用户要的就是窗口，不切
+        if (!_hub.Silent)
+        {
+            return (false, null);
+        }
+
+        // [段2] 当前实例已是静默（或没有实例）——无需切换
+        BrowserInstance? alive = await _hub.FindAliveAsync(site.ProfileDir).ConfigureAwait(false);
+        if (alive is null || alive.Headless)
+        {
+            return (false, null);
+        }
+
+        // [段3] 换成静默实例（模式不符会停旧起新）并复探登录态
+        await _hub.EnsureAsync(site.ProfileDir, site.BaseUrl, ct).ConfigureAwait(false);
+
+        CdpSession session = await OpenSessionAsync(site, ct).ConfigureAwait(false);
+        await using (session)
+        {
+            return (true, await ReadLoginStateAsync(session, site, ct).ConfigureAwait(false));
+        }
     }
 
     /// <summary>

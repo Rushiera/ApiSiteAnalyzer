@@ -51,6 +51,12 @@ public sealed class PanelSettings
     /// <summary>拉取是否走增量（追平即停；默认开）。</summary>
     public bool Incremental { get; set; } = true;
 
+    /// <summary>
+    /// 静默采集模式——true = 受控浏览器以 headless 启动（采集全程无窗口），false = 可见窗口。
+    /// 默认开：日常采集不需要人看着；登录是低频动作，点「去登录」时才临时切出窗口（登录完自动切回）。
+    /// </summary>
+    public bool Silent { get; set; } = true;
+
     /// <summary>卡片顺序（拖拽排定的卡片键序列）——与自动采集设置同一份文件，换浏览器 / 清缓存都不丢。</summary>
     public List<string> CardOrder { get; set; } = new List<string>(DefaultCardOrder);
 
@@ -167,6 +173,14 @@ public sealed class PanelSettings
         return seconds;
     }
 
+    /// <summary>设置静默采集模式并落盘。</summary>
+    /// <param name="silent">是否静默（headless）。</param>
+    public void SetSilent(bool silent)
+    {
+        Silent = silent;
+        Save();
+    }
+
     /// <summary>更新设置并落盘。</summary>
     /// <param name="autoEnabled">自动采集开关。</param>
     /// <param name="intervalSeconds">间隔（秒）。</param>
@@ -199,6 +213,8 @@ public sealed class PanelSettings
             AutoEnabled = loaded.AutoEnabled;
             AutoIntervalSeconds = ClampInterval(loaded.AutoIntervalSeconds);
             Incremental = loaded.Incremental;
+            /* 旧设置文件没有 silent（DTO 默认 true）→ 静默——升级后默认不再弹窗口 */
+            Silent = loaded.Silent;
             /* 旧设置文件没有 cardOrder（读到 null）→ 给全默认顺序——不静默丢卡片 */
             CardOrder = NormalizeCardOrder(loaded.CardOrder);
         }
@@ -220,6 +236,7 @@ public sealed class PanelSettings
             AutoEnabled = AutoEnabled,
             AutoIntervalSeconds = AutoIntervalSeconds,
             Incremental = Incremental,
+            Silent = Silent,
             CardOrder = CardOrder,
         };
 
@@ -258,6 +275,9 @@ public sealed class PanelSettings
 
         /// <summary>是否增量拉取。</summary>
         public bool Incremental { get; set; } = true;
+
+        /// <summary>是否静默采集（headless）。</summary>
+        public bool Silent { get; set; } = true;
 
         /// <summary>卡片顺序（卡片键序列）——缺即 null，由 Load 补全默认顺序。</summary>
         public List<string>? CardOrder { get; set; }

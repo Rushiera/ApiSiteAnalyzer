@@ -59,7 +59,7 @@ public sealed class CdpSession : IAsyncDisposable
     /// <returns>已连接的 CDP 会话。</returns>
     public static async Task<CdpSession> StartAsync(string chromePath, string profileDir, int timeoutMs, CancellationToken ct)
     {
-        ChromeProcess chrome = await ChromeLauncher.StartHeadlessAsync(chromePath, profileDir, timeoutMs, ct).ConfigureAwait(false);
+        ChromeProcess chrome = await ChromeLauncher.StartHeadlessAsync(chromePath, profileDir, "about:blank", timeoutMs, ct).ConfigureAwait(false);
 
         try
         {

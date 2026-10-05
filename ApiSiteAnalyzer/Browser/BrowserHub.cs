@@ -27,6 +27,13 @@ public sealed class BrowserInstance
     /// <summary>启动时刻（yyyy-MM-dd HH:mm:ss）。</summary>
     public string StartedAt { get; set; } = "";
 
+    /// <summary>
+    /// 是否以静默（headless）方式启动——true = 采集全程无窗口，false = 可见窗口（登录用）。
+    /// **必须跨进程持久**：登记表里缺本字段的旧条目反序列化为 false（窗口模式），
+    /// 与静默请求不匹配即被重建——升级后首轮采集自动把遗留的可见实例换成静默实例。
+    /// </summary>
+    public bool Headless { get; set; }
+
     /// <summary>通道标签页 id（采集在它里面执行，不影响用户正在看的页面）。</summary>
     public string ChannelTargetId { get; set; } = "";
 
@@ -129,6 +136,12 @@ public sealed class BrowserHub
     /// <summary>chrome.exe 路径。</summary>
     public string ChromePath => _chromePath;
 
+    /// <summary>
+    /// 静默采集模式——true = 受控实例以 headless 启动（采集无窗口），false = 可见窗口。
+    /// 由面板设置（`data/settings.json` 的 `silent`）驱动；登录始终强制可见（见 `EnsureWindowAsync`）。
+    /// </summary>
+    public bool Silent { get; set; } = true;
+
     /// <summary>取该用户目录的存活受控实例（不启动）。</summary>
     /// <param name="profileDir">浏览器用户数据目录。</param>
     /// <returns>存活实例；无则 null。</returns>
@@ -149,15 +162,39 @@ public sealed class BrowserHub
         return null;
     }
 
-    /// <summary>确保该用户目录有一个受控实例——活着就复用，否则启动可见窗口。</summary>
+    /// <summary>按静默设置确保受控实例——活着且模式相符就复用，否则启动。</summary>
     /// <param name="profileDir">浏览器用户数据目录。</param>
     /// <param name="url">启动时打开的地址（复用已有实例时导航到它）。</param>
     /// <param name="ct">取消令牌。</param>
+    /// <returns>受控实例 + 本次是否新建（含模式不符时重建）。</returns>
+    public Task<(BrowserInstance Instance, bool Launched)> EnsureAsync(string profileDir, string url, CancellationToken ct)
+    {
+        return EnsureCoreAsync(profileDir, url, Silent, ct);
+    }
+
+    /// <summary>确保受控实例为**可见窗口**——登录专用（静默模式下点「去登录」时把 headless 实例换成窗口实例）。</summary>
+    /// <param name="profileDir">浏览器用户数据目录。</param>
+    /// <param name="url">启动时打开的地址。</param>
+    /// <param name="ct">取消令牌。</param>
     /// <returns>受控实例 + 本次是否新建。</returns>
-    public async Task<(BrowserInstance Instance, bool Launched)> EnsureAsync(string profileDir, string url, CancellationToken ct)
+    public Task<(BrowserInstance Instance, bool Launched)> EnsureWindowAsync(string profileDir, string url, CancellationToken ct)
+    {
+        return EnsureCoreAsync(profileDir, url, false, ct);
+    }
+
+    /// <summary>
+    /// 按指定模式确保受控实例。**模式不符先停旧实例**——同一用户目录同时只能有一个 chrome
+    /// （起第二个会被单例转发吃掉、静默退出），故静默与窗口之间的切换必须「停旧起新」。
+    /// </summary>
+    /// <param name="profileDir">浏览器用户数据目录。</param>
+    /// <param name="url">启动时打开的地址。</param>
+    /// <param name="headless">是否静默（headless）。</param>
+    /// <param name="ct">取消令牌。</param>
+    /// <returns>受控实例 + 本次是否新建。</returns>
+    private async Task<(BrowserInstance Instance, bool Launched)> EnsureCoreAsync(string profileDir, string url, bool headless, CancellationToken ct)
     {
         BrowserInstance? alive = await FindAliveAsync(profileDir).ConfigureAwait(false);
-        if (alive is not null)
+        if (alive is not null && alive.Headless == headless)
         {
             return (alive, false);
         }
@@ -166,9 +203,15 @@ public sealed class BrowserHub
         try
         {
             alive = await FindAliveAsync(profileDir).ConfigureAwait(false);
-            if (alive is not null)
+            if (alive is not null && alive.Headless == headless)
             {
                 return (alive, false);
+            }
+
+            // [段0] 模式不符（静默 ↔ 窗口切换）——先停旧实例，否则新实例会被单例转发吃掉
+            if (alive is not null)
+            {
+                await StopInstanceAsync(alive, ct).ConfigureAwait(false);
             }
 
             // [段1] 登记表里没有、但该用户目录已被别的进程实例占用（CLI 与面板各自持有内存副本）——
@@ -177,7 +220,12 @@ public sealed class BrowserHub
             BrowserInstance? adopted = await TryAdoptAsync(profileDir).ConfigureAwait(false);
             if (adopted is not null)
             {
-                return (adopted, false);
+                if (adopted.Headless == headless)
+                {
+                    return (adopted, false);
+                }
+
+                await StopInstanceAsync(adopted, ct).ConfigureAwait(false);
             }
 
             // [段2] 用户目录被**非受控**实例占用（用户自己开的 chrome 用了同一目录）——
@@ -190,13 +238,23 @@ public sealed class BrowserHub
                     "）——请关闭它后重试（登录态在该目录里，关掉不影响）");
             }
 
-            ChromeProcess chrome = await ChromeLauncher.StartWindowAsync(_chromePath, profileDir, url, 30000, ct).ConfigureAwait(false);
+            ChromeProcess chrome;
+            if (headless)
+            {
+                chrome = await ChromeLauncher.StartHeadlessAsync(_chromePath, profileDir, url, 30000, ct).ConfigureAwait(false);
+            }
+            else
+            {
+                chrome = await ChromeLauncher.StartWindowAsync(_chromePath, profileDir, url, 30000, ct).ConfigureAwait(false);
+            }
+
             var instance = new BrowserInstance
             {
                 ProfileDir = profileDir,
                 Port = chrome.Port,
                 Pid = chrome.Pid,
                 StartedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
+                Headless = headless,
                 ChannelTargetId = "",
             };
 
@@ -213,6 +271,70 @@ public sealed class BrowserHub
             _launchLock.Release();
         }
     }
+    /// <summary>
+    /// 停掉一个受控实例——结束进程树、摘出登记表，并等进程真正退出。
+    /// **必须等退出**：模式切换后要立刻起新实例，旧进程还占着用户目录时新进程会被单例转发吃掉。
+    /// 只处理受控实例——该用户目录是程序专用目录，占用者必是本程序启动的实例；
+    /// 用户自己开的 chrome 用了同一目录时，`EnsureCoreAsync` 在启动前就已出声拒绝，走不到这里。
+    /// </summary>
+    /// <param name="instance">待停止的受控实例。</param>
+    /// <param name="ct">取消令牌。</param>
+    private async Task StopInstanceAsync(BrowserInstance instance, CancellationToken ct)
+    {
+        Remove(instance.ProfileDir);
+
+        var pids = new List<int>();
+        if (instance.Pid > 0)
+        {
+            pids.Add(instance.Pid);
+        }
+        else
+        {
+            // [段1] 接管来的实例可能没有 pid（登记表落后）——按用户目录反查占用进程
+            pids.AddRange(await FindOccupantsAsync(instance.ProfileDir, ct).ConfigureAwait(false));
+        }
+
+        foreach (int pid in pids)
+        {
+            try
+            {
+                using Process process = Process.GetProcessById(pid);
+                process.Kill(entireProcessTree: true);
+                await WaitExitAsync(process, ct).ConfigureAwait(false);
+            }
+            catch (ArgumentException)
+            {
+                // 进程已退出——无需处理
+            }
+            catch (Win32Exception)
+            {
+                // 无权结束或进程已消失——无需处理
+            }
+            catch (InvalidOperationException)
+            {
+                // 进程已退出——无需处理
+            }
+        }
+    }
+
+    /// <summary>等进程退出（上限 10 秒）——超时不抛，交给后续的占用检查出声。</summary>
+    /// <param name="process">已发起结束的进程。</param>
+    /// <param name="ct">取消令牌。</param>
+    private static async Task WaitExitAsync(Process process, CancellationToken ct)
+    {
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(10000);
+
+        try
+        {
+            await process.WaitForExitAsync(cts.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // 超时——后续启动流程的占用检查会给出可操作指引
+        }
+    }
+
     /// <summary>
     /// 从用户目录里的 DevToolsActivePort（chrome 自己写的权威端口文件）接管一个已在运行的实例。
     /// 端口探活失败即放弃（文件可能是上次运行的残留），调用方据此正常走启动流程。
@@ -260,6 +382,7 @@ public sealed class BrowserHub
             Port = port,
             Pid = recorded?.Pid ?? 0,
             StartedAt = writtenAt.ToString("yyyy-MM-dd HH:mm:ss"),
+            Headless = recorded?.Headless ?? false,
             ChannelTargetId = recorded?.ChannelTargetId ?? "",
             HookedSites = recorded?.HookedSites ?? "",
         };

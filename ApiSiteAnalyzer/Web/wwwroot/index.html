@@ -313,6 +313,10 @@
         <input type="checkbox" id="optIncremental" checked />
         <label for="optIncremental">增量拉取（连续 20 条与库内一致即停止，不重扫历史）</label>
       </div>
+      <div class="row">
+        <input type="checkbox" id="optSilent" checked />
+        <label for="optSilent">静默采集（浏览器在后台运行，不弹窗口；点「去登录」时才临时切出窗口，登录完自动切回）</label>
+      </div>
       <div class="actions">
         <button id="btnFull">全量拉取一次</button>
         <div class="spacer"></div>
@@ -1041,12 +1045,12 @@ async function checkLogin(){
     renderBalance(r.quota);
     setStatus(direct
       ? 'API key 有效 · 账号 ' + r.username + ' · 本次可见 ' + fmtNum(r.requestCount) + ' 条记录'
-      : '已登录 · 用户 ' + r.username + ' · 请求数 ' + fmtNum(r.requestCount), 'ok');
+      : '已登录 · 用户 ' + r.username + ' · 请求数 ' + fmtNum(r.requestCount) + (r.silentNote ? '　' + r.silentNote : ''), 'ok');
   }else{
     renderBalance(null);
     setStatus(direct
       ? (r.message || 'API key 无效') + ' —— 在顶部 key 框里改好后点「保存」'
-      : (r.message || '未登录') + ' —— 点右上角「去登录」', 'bad');
+      : (r.message || '未登录') + ' —— 点右上角「去登录」（会打开浏览器窗口）', 'bad');
   }
 }
 
@@ -1106,7 +1110,7 @@ function renderLastCards(){
   if(lastCards) renderCards(lastCards.o, lastCards.sym, lastCards.cur);
 }
 
-let settings = { autoEnabled:true, autoIntervalSeconds:29, incremental:true, minIntervalSeconds:3, maxIntervalSeconds:119 };
+let settings = { autoEnabled:true, autoIntervalSeconds:29, incremental:true, silent:true, minIntervalSeconds:3, maxIntervalSeconds:119 };
 
 function renderSettings(){
   $('optAuto').checked = settings.autoEnabled;
@@ -1115,6 +1119,7 @@ function renderSettings(){
   $('optInterval').value = settings.autoIntervalSeconds;
   $('optIntervalVal').textContent = settings.autoIntervalSeconds + ' s';
   $('optIncremental').checked = settings.incremental;
+  $('optSilent').checked = settings.silent;
 }
 
 /* 工作状态（总览顶部）——按「最近一次提交」距现在多久画进度条：
@@ -1209,7 +1214,8 @@ async function saveSettings(){
   const body = {
     auto: $('optAuto').checked ? 'true' : 'false',
     interval: String($('optInterval').value),
-    incremental: $('optIncremental').checked ? 'true' : 'false'
+    incremental: $('optIncremental').checked ? 'true' : 'false',
+    silent: $('optSilent').checked ? 'true' : 'false'
   };
   const r = await fetch('/api/settings', {
     method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)
@@ -1218,6 +1224,7 @@ async function saveSettings(){
   settings.autoEnabled = r.autoEnabled;
   settings.autoIntervalSeconds = r.autoIntervalSeconds;
   settings.incremental = r.incremental;
+  settings.silent = r.silent;
   renderSettings();
   return true;
 }

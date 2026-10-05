@@ -39,12 +39,13 @@ public static class ServeRunner
     /// <returns>退出码。</returns>
     public static async Task<int> RunAsync(AppConfig config, List<IApiSite> sites, string chromePath, string dataDir, CancellationToken ct)
     {
+        var settings = new PanelSettings(Path.Combine(dataDir, "settings.json"));
         var hub = new BrowserHub(chromePath, Path.Combine(dataDir, "browsers.json"));
+        hub.Silent = settings.Silent;
         var session = new SiteSession(hub);
         var queue = new TaskQueue();
         var dbPath = Path.Combine(dataDir, "usage.db");
         var state = new PanelState(sites, dbPath);
-        var settings = new PanelSettings(Path.Combine(dataDir, "settings.json"));
         var keys = new KeyStore(Path.Combine(dataDir, "keys.json"));
         var collector = new AutoCollector(session, sites, dbPath, state, settings);
         var watch = new WorkWatch(session, sites, dbPath, state, collector);
@@ -120,6 +121,7 @@ public static class ServeRunner
                     autoEnabled = settings.AutoEnabled,
                     autoIntervalSeconds = settings.AutoIntervalSeconds,
                     incremental = settings.Incremental,
+                    silent = settings.Silent,
                     minIntervalSeconds = PanelSettings.MinIntervalSeconds,
                     maxIntervalSeconds = PanelSettings.MaxIntervalSeconds,
                     cardOrder = settings.CardOrder,
@@ -150,7 +152,24 @@ public static class ServeRunner
                 return Results.Json(new { ok = false, error = "interval 必须是整数秒，收到：" + interval });
             }
 
+            // [段1] 静默采集模式——可选字段（缺省 = 不改），给值即校验 + 落盘 + 同步受控浏览器中心；
+            //        模式真正落地在下次采集：EnsureAsync 发现实例模式不符会停旧起新
+            string silent = await ReadFieldAsync(context, "silent");
+            if (silent.Length > 0 && silent != "true" && silent != "false")
+            {
+                return Results.Json(new { ok = false, error = "silent 必须是 true / false，收到：" + silent });
+            }
+
             settings.Update(auto == "true", seconds, incremental == "true");
+
+            bool silentChanged = false;
+            if (silent.Length > 0 && settings.Silent != (silent == "true"))
+            {
+                settings.SetSilent(silent == "true");
+                hub.Silent = settings.Silent;
+                silentChanged = true;
+            }
+
             collector.Reset();
             return Results.Json(new
             {
@@ -158,6 +177,8 @@ public static class ServeRunner
                 autoEnabled = settings.AutoEnabled,
                 autoIntervalSeconds = settings.AutoIntervalSeconds,
                 incremental = settings.Incremental,
+                silent = settings.Silent,
+                silentChanged = silentChanged,
             });
         });
 
@@ -182,6 +203,32 @@ public static class ServeRunner
         {
             string siteId = await ReadFieldAsync(context, "site");
 
+            // 探测登录态 + 登录成功后按设置切回静默——登录用的可见窗口只在登录期间存在，
+            // 点完「检查登录」窗口即消失（切换后复探一次，切换本身可验证）
+            async Task<(LoginState Login, bool Switched)> ProbeAndSettleAsync(IApiSite item)
+            {
+                LoginState probe = await queue.RunAsync(() => session.ProbeLoginAsync(item, CancellationToken.None)).ConfigureAwait(false);
+                if (!probe.LoggedIn)
+                {
+                    return (probe, false);
+                }
+
+                (bool switched, LoginState? after) = await queue.RunAsync(() =>
+                    session.SwitchToSilentAsync(item, CancellationToken.None)).ConfigureAwait(false);
+
+                if (!switched)
+                {
+                    return (probe, false);
+                }
+
+                if (after is null)
+                {
+                    return (probe, true);
+                }
+
+                return (after, true);
+            }
+
             // [段3a] 总览——对**全部站点**依次探测（总览不是站点，动作落在每个站点上）；
             //        单站失败不中断整轮，逐站如实回报（结果同时写进各站登录态缓存）
             if (IsAllSites(siteId))
@@ -192,7 +239,7 @@ public static class ServeRunner
                 {
                     try
                     {
-                        LoginState probe = await queue.RunAsync(() => session.ProbeLoginAsync(item, CancellationToken.None)).ConfigureAwait(false);
+                        (LoginState probe, _) = await ProbeAndSettleAsync(item);
                         state.SetBalance(item.Id, probe.Quota);
                         state.SetLogin(item.Id, probe.LoggedIn, probe.Username, probe.LoggedIn ? "" : probe.Message);
                         if (probe.LoggedIn)
@@ -246,7 +293,17 @@ public static class ServeRunner
 
             try
             {
-                LoginState login = await queue.RunAsync(() => session.ProbeLoginAsync(site, CancellationToken.None)).ConfigureAwait(false);
+                (LoginState login, bool switchedToSilent) = await ProbeAndSettleAsync(site);
+
+                // 切回静默后的复探结论——登录态在用户目录里，换实例不影响它；没通过就如实说
+                string silentNote = "";
+                if (switchedToSilent)
+                {
+                    silentNote = login.LoggedIn
+                        ? "已切回静默采集（登录窗口已关闭，登录态保留）"
+                        : "已切回静默采集，但复探未通过：" + login.Message;
+                }
+
                 state.SetBalance(site.Id, login.Quota);
                 state.SetLogin(site.Id, login.LoggedIn, login.Username, login.LoggedIn ? "" : login.Message);
                 return Results.Json(new
@@ -259,6 +316,8 @@ public static class ServeRunner
                     requestCount = login.RequestCount,
                     group = login.Group,
                     message = login.Message,
+                    switchedToSilent = switchedToSilent,
+                    silentNote = silentNote,
                 });
             }
             catch (Exception ex)
@@ -822,7 +881,7 @@ public static class ServeRunner
         return left > right;
     }
 
-    /// <summary>把版本文本解析成可比较对象（截掉 -preview / +build 后缀）。</summary>
+    /// <summary>把版本文本解析成可比较对象（截掉 -preview / +build 后缀；缺段补 0——三段与四段可比）。</summary>
     private static Version? ParseVersion(string text)
     {
         string trimmed = text.Trim();
@@ -832,7 +891,17 @@ public static class ServeRunner
             trimmed = trimmed.Substring(0, cut);
         }
 
-        return Version.TryParse(trimmed, out Version? parsed) ? parsed : null;
+        if (!Version.TryParse(trimmed, out Version? parsed))
+        {
+            return null;
+        }
+
+        // [段1] 缺段补 0——槽位读的是 FileVersion（四段 0.19.0.0），运行版本是 InformationalVersion
+        //        （常为三段 0.19.0+hash）；不补齐时 revision 未指定 = -1 < 0，同一版本被判成「有新版本」
+        int minor = parsed.Minor < 0 ? 0 : parsed.Minor;
+        int build = parsed.Build < 0 ? 0 : parsed.Build;
+        int revision = parsed.Revision < 0 ? 0 : parsed.Revision;
+        return new Version(parsed.Major, minor, build, revision);
     }
 
     /// <summary>总览键——面板下拉第一项，代表「合并全部站点」；不是真实站点（无适配器、不可采集）。</summary>
