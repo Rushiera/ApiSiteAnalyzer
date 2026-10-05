@@ -204,21 +204,39 @@
   .idrow .idcontent{margin-top:3px;color:var(--dim);font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere;
     max-height:3.6em;overflow:hidden}
 
-  /* 线程分析（弹窗内第二个视图）——按「上一轮输入+输出 == 下一轮输入（容差 5%）」串链；
-     并发轮标红并给原因。列表视图与它互斥显示，由「线程分析 / 返回列表」两个按钮切换 */
-  .threads{max-height:56vh;overflow:auto;border:1px solid var(--line);border-radius:8px}
-  .threadbox{padding:9px 11px;border-bottom:1px solid var(--line)}
-  .threadbox:last-child{border-bottom:none}
-  .threadbox .thead{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap}
-  .threadbox .tno{color:var(--dim);font-size:11px;min-width:34px;font-variant-numeric:tabular-nums}
-  .threadbox .tname{font-weight:600;font-size:12px}
-  .threadbox .tmeta{color:var(--dim);font-size:11px}
-  .threadbox .tflag{padding:1px 6px;border-radius:4px;background:#1e2632;color:var(--dim);font-size:11px}
-  .threadbox.concurrent .tflag{background:#3a1f24;color:#ff8a8a}
-  .threadbox .steps{margin-top:5px;display:flex;flex-direction:column;gap:3px}
+  /* 线程分析（弹窗内第二个视图）——按「上一轮输入+输出 == 下一轮输入」串链（相对 5% + 绝对 ≤1000 + 方向约束）；
+     双视图：列表（每条链一行摘要，点开看逐轮）/ 时间轴（每链一行，横轴时间）。
+     颜色三级：红 = 并发（出度 / 同时在场）· 黄 = 分叉候选（另一个去向）· 蓝 = 普通轮 */
+  .threads{max-height:56vh;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:9px 11px}
+  .tsum{display:flex;flex-wrap:wrap;align-items:center;gap:11px;font-size:12px;color:var(--dim);
+    padding-bottom:7px;border-bottom:1px solid var(--line);margin-bottom:8px}
+  .tsum b{color:var(--text);font-weight:600;font-variant-numeric:tabular-nums}
+  .tsum .red b{color:#ff8a8a}
+  .tsum .yellow b{color:var(--warn)}
+  .tlegend{display:flex;align-items:center;gap:10px;font-size:11px;color:var(--dim);margin-left:auto}
+  .tlegend i{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:4px;vertical-align:middle}
+  .tlegend i.n{background:#6aa9ff}
+  .tlegend i.c{background:#ff6b6b}
+  .tlegend i.f{background:var(--warn)}
+  .tswitch{display:flex;gap:6px;margin-bottom:7px}
+  .tswitch button{font-size:11px;padding:2px 10px}
+  .tswitch button.on{background:#243040;border-color:#3d5570}
+  .tchain{border-bottom:1px solid var(--line)}
+  .tchain:last-child{border-bottom:none}
+  .tchain .thead{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap;padding:5px 3px;cursor:pointer;border-radius:5px}
+  .tchain .thead:hover{background:#1a212b}
+  .tchain .tno{color:var(--dim);font-size:11px;min-width:30px;font-variant-numeric:tabular-nums}
+  .tchain .tmeta{color:var(--dim);font-size:11px;font-variant-numeric:tabular-nums}
+  .tchain .tflag{padding:1px 6px;border-radius:4px;background:#1e2632;color:var(--dim);font-size:11px}
+  .tchain .tflag.red{background:#3a1f24;color:#ff8a8a}
+  .tchain .tflag.yellow{background:#332b16;color:var(--warn)}
+  .tchain .tcaret{margin-left:auto;color:var(--dim);font-size:10px}
+  .tchain .steps{display:none;padding:1px 0 7px 0}
+  .tchain.open .steps{display:block}
   .tstep{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap;font-size:12px;
     padding:2px 6px;border-radius:5px;border-left:2px solid transparent}
   .tstep.concurrent{border-left-color:var(--bad);background:#1d1517}
+  .tstep.forkcand{border-left-color:var(--warn);background:#1d1a12}
   .tstep .sno{color:var(--dim);font-size:11px;min-width:26px;font-variant-numeric:tabular-nums}
   .tstep .stime{color:var(--dim);font-size:11px;font-variant-numeric:tabular-nums;min-width:112px}
   .tstep .stok{font-variant-numeric:tabular-nums}
@@ -226,7 +244,25 @@
   .tstep .srid{font-family:Consolas,"Courier New",monospace;font-size:11px;color:var(--dim);
     max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .tstep .sreason{color:#ff8a8a;font-size:11px}
+  .tstep.forkcand .sreason{color:var(--warn)}
   .tempty{color:var(--dim);font-size:12px;padding:12px}
+  /* 时间轴——每链一行，横轴时间；分叉画斜线 */
+  .ttime svg{display:block}
+  .ttime text{font-size:10px;fill:var(--dim)}
+
+  /* 「本地消费金额」卡片下方小字——过去 24 小时的金额（点卡片打开逐小时子窗口）；
+     布局与卡片对比行同族：左说明、右数值 */
+  .hourline{display:flex;justify-content:space-between;gap:6px;font-size:11px;font-weight:400;line-height:1.35;
+    margin-top:2px;color:var(--gold)}
+
+  /* 过去 24 小时消耗金额弹窗——逐小时一行：时刻 / 金额条 / 金额（条长只与各小时金额比，与其他图无关） */
+  .hours{max-height:56vh;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:9px 11px}
+  .hours .hbar{display:grid;grid-template-columns:120px 1fr 120px;gap:10px;align-items:center;margin:4px 0;font-size:12px}
+  .hours .hbar .hname{color:var(--dim);font-variant-numeric:tabular-nums}
+  .hours .hbar .htrack{background:#1c222b;border-radius:4px;height:12px;overflow:hidden}
+  .hours .hbar .hfill{height:100%;background:linear-gradient(90deg,#8a6a1f,var(--gold));border-radius:4px}
+  .hours .hbar .hval{text-align:right;font-variant-numeric:tabular-nums}
+  .hours .hbar.empty{opacity:.45}
 </style>
 </head>
 <body>
@@ -292,13 +328,33 @@
       <div class="hint" id="idhint">读取中…</div>
       <div class="ids" id="idlist"></div>
       <!-- 线程分析视图——与上面列表互斥显示（同一弹窗内切换，不另开弹窗） -->
-      <div class="threads" id="threadlist" style="display:none"></div>
+      <div class="threads" id="threadlist" style="display:none">
+        <div class="tsum" id="tsum"></div>
+        <div class="tswitch">
+          <button id="btnViewList" class="on">列表</button>
+          <button id="btnViewTime">时间轴</button>
+        </div>
+        <div id="tlist"></div>
+        <div class="ttime" id="ttime" style="display:none"></div>
+      </div>
       <div class="actions">
         <button id="btnIdMore">加载更多</button>
         <button id="btnThread">线程分析</button>
         <div class="spacer"></div>
         <button id="btnThreadBack" style="display:none">返回列表</button>
         <button id="btnIdClose">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="mask" id="amask">
+    <div class="dialog wide">
+      <h3>过去 24 小时消耗金额</h3>
+      <div class="hint" id="ahint">读取中…</div>
+      <div class="hours" id="hourlist"></div>
+      <div class="actions">
+        <div class="spacer"></div>
+        <button id="btnAmountClose">关闭</button>
       </div>
     </div>
   </div>
@@ -519,6 +575,7 @@ function renderOfficial(){
    面板上所有属于站点的东西一次性换到新站点；明细弹窗就地关掉（那属于上一个站）。 */
 async function switchSite(){
   closeRequestIds();
+  closeAmountHours();
   applyMode();
   await loadSites(currentSite);
   const s = siteMap[currentSite];
@@ -670,12 +727,13 @@ const CARD_KEYS = ['requestIds', 'amount', 'avgFirstToken', 'avgUseTime', 'compl
   'promptTokens', 'cacheHitRate', 'requestIds24h', 'amount24h', 'avgSpeed',
   'cacheTokens', 'completion24h', 'prompt24h', 'cacheHitRate24h'];
 
-function renderCards(o, sym){
+function renderCards(o, sym, cur){
   const n = o.recentSampleCount || 0;
   const win = n >= 10 ? '近十次' : ('近 ' + n + ' 次');
   /* 对比行参照窗口——再往前十次（第 11–20 次）的样本数；不足即如实说明，不静默省略 */
   const pc = o.prevSampleCount || 0;
-  /* 卡片条目：[标签, 值, 弹窗键?, 下方小字 HTML?]——第 3 项供「已探明请求 ID」挂点击弹窗，第 4 项供「输入 Token」挂缓存小字、三个均值卡片挂对比行
+  /* 卡片条目：[标签, 值, 弹窗键?, 下方小字 HTML?]——第 3 项供「已探明请求 ID」与「本地消费金额」挂点击弹窗，
+     第 4 项供「输入 Token」挂缓存小字、三个均值卡片挂对比行、金额卡片挂「过去 24 小时」小字
      条目按默认顺序给出（下标即 CARD_KEYS 的下标）——显示顺序由下面那次重排决定，勿在此处调顺序 */
   /* 默认顺序（2026-10-02 Rushiera 排定 · v0.15.3）：
      已探明请求 ID → 本地消费金额 → 近十次平均首字延迟 → 近十次平均耗时 → 输出 Token → 输入 Token →
@@ -685,7 +743,8 @@ function renderCards(o, sym){
      ⚠ items 的下标必须与上方 CARD_KEYS 逐项对应——改顺序动两处，不动这里 */
   const items = [
     ['已探明请求 ID', fmtNum(o.requestIdCount), 'requestIds'],
-    ['本地消费金额', fmtAmount(o.amount, sym)],
+    ['本地消费金额', fmtAmount(o.amount, sym), 'amount',
+      '<div class="hourline"><span>过去 24 小时</span><span>' + fmtAmount(cur ? cur.amount : 0, sym) + '</span></div>'],
     [win + '平均首字延迟', Math.round(o.recentAvgFirstTokenMs) + ' ms', null, deltaLine(o.recentAvgFirstTokenMs, o.prevAvgFirstTokenMs, pc, true, Math.round(o.prevAvgFirstTokenMs) + ' ms')],
     [win + '平均耗时', fmtNum(Math.round(o.recentAvgUseTime*1000)) + ' ms', null, deltaLine(o.recentAvgUseTime, o.prevAvgUseTime, pc, true, fmtNum(Math.round(o.prevAvgUseTime*1000)) + ' ms')],
     ['输出 Token', fmtNum(o.completionTokens)],
@@ -707,7 +766,7 @@ function renderCards(o, sym){
       delta24Line(o.last24h.cacheHitRate, o.prev24h.cacheHitRate, o.prev24h.count, (o.prev24h.cacheHitRate*100).toFixed(1) + '%', 'up')],
   ];
   /* 最近一次卡片的渲染入参——拖拽改序后据此**原样重渲染**（不重拉分析接口：改顺序不该动数据） */
-  lastCards = { o: o, sym: sym };
+  lastCards = { o: o, sym: sym, cur: cur };
   $('cards').innerHTML = orderedCardIndex().map(i => {
     const it = items[i];
     return '<div class="card' + (it[2] ? ' clickable' : '') + '" draggable="true" data-ckey="' + esc(CARD_KEYS[i]) + '"' +
@@ -879,7 +938,7 @@ async function loadAnalysis(){
   if(!r.ok){ setStatus('分析数据读取失败：' + (r.error||''), 'bad'); return; }
   const sym = r.site.currencySymbol;
   curSym = sym;
-  renderCards(r.overview, sym);
+  renderCards(r.overview, sym, r.current);
   renderBars('byModel', r.byModel);
   renderBars('byDay', r.byDay, {label: x => x.name, days: true, stack: true, idbar: true, current: r.current});
   renderBars('byHour', r.byHour, {label: x => x.name + ' 时', stack: true, idbar: true});
@@ -1044,7 +1103,7 @@ let dragMoved = false;
 
 /* 按当前顺序原样重渲染卡片——顺序改动只影响排列，不重拉分析接口（数据与顺序无关） */
 function renderLastCards(){
-  if(lastCards) renderCards(lastCards.o, lastCards.sym);
+  if(lastCards) renderCards(lastCards.o, lastCards.sym, lastCards.cur);
 }
 
 let settings = { autoEnabled:true, autoIntervalSeconds:29, incremental:true, minIntervalSeconds:3, maxIntervalSeconds:119 };
@@ -1239,10 +1298,65 @@ function openRequestIds(){
 
 function closeRequestIds(){ $('idmask').className = 'mask'; }
 
+/* ---------- 过去 24 小时消耗金额（点「本地消费金额」卡片打开） ---------- */
+/* 口径：滚动 24 小时——小时 ≤ 当前时取今天、> 当前时取昨天（与服务端「当前」行、按小时图同一份取数）。
+   故卡片小字、子窗口合计、按小时图三者同源同值；桶按整点小时分，最近的小时排在最上。 */
+function hourLabel(b){
+  const today = new Date();
+  const day = new Date(b.day + 'T00:00:00');
+  const isToday = day.getFullYear() === today.getFullYear() && day.getMonth() === today.getMonth() && day.getDate() === today.getDate();
+  return (isToday ? '今天 ' : '昨天 ') + String(b.hour).padStart(2, '0') + ' 时';
+}
+
+function renderAmountHours(r){
+  const box = $('hourlist');
+  if(!r || !r.ok){
+    const msg = (r && r.error) || '接口无响应';
+    box.innerHTML = '<div class="tempty">读取失败：' + esc(msg) + '</div>';
+    $('ahint').textContent = '过去 24 小时（滚动口径）';
+    return;
+  }
+  const sym = (r.site && r.site.currencySymbol) || '';
+  if(!r.hours || !r.hours.length){
+    box.innerHTML = '<div class="tempty">近两天没有记录——没有可展示的小时。</div>';
+    $('ahint').textContent = '过去 24 小时（滚动口径）· 合计 ' + fmtAmount(0, sym);
+    return;
+  }
+  const max = Math.max.apply(null, r.hours.map(b => b.amount)) || 1;
+  box.innerHTML = r.hours.slice().reverse().map(b => {
+    const w = b.amount > 0 ? Math.max(1, Math.round(b.amount / max * 100)) : 0;
+    const tip = hourLabel(b) + '：' + fmtNum(b.count) + ' 次请求 · 输入 ' + fmtNum(b.promptTokens) +
+      ' / 输出 ' + fmtNum(b.completionTokens) + ' token';
+    return '<div class="hbar' + (b.count ? '' : ' empty') + '" title="' + esc(tip) + '">' +
+      '<div class="hname">' + esc(hourLabel(b)) + '</div>' +
+      '<div class="htrack"><div class="hfill" style="width:' + w + '%"></div></div>' +
+      '<div class="hval">' + esc(fmtAmount(b.amount, sym)) + '</div>' +
+      '</div>';
+  }).join('');
+  const span = hourLabel(r.hours[0]) + ' → ' + hourLabel(r.hours[r.hours.length - 1]);
+  $('ahint').textContent = span + '（按整点小时分桶）· 合计 ' + fmtAmount(r.total.amount, sym) +
+    ' · ' + fmtNum(r.total.count) + ' 次请求';
+}
+
+async function openAmountHours(){
+  if(!currentSite) return;
+  $('hourlist').innerHTML = '<div class="tempty">读取中…</div>';
+  $('ahint').textContent = '读取中…';
+  $('amask').className = 'mask show';
+  const url = '/api/amount-hours?site=' + encodeURIComponent(currentSite) +
+    '&range=' + encodeURIComponent($('range').value);
+  const r = await fetch(url).then(x=>x.json()).catch(()=>null);
+  if(!r || !r.ok){ setStatus('过去 24 小时金额读取失败：' + ((r && r.error) || '接口无响应'), 'bad'); }
+  renderAmountHours(r);
+}
+
+function closeAmountHours(){ $('amask').className = 'mask'; }
+
 /* ---------- 线程分析（弹窗内第二个视图） ---------- */
-/* 口径：取最近 200 条记录（按当前站点与范围），按「上一轮输入 + 输出 == 下一轮输入（容差 5%）」串链；
-   并发两条判据——① 一轮在容差内有多个后继（分叉）；② 分属不同链的两轮输入在容差内重合（交叠）。
-   标记只活在本次分析里，不落库（需求定案：不落库）。 */
+/* 口径：取最近 200 条记录（按当前站点与范围），按「上一轮输入 + 输出 == 下一轮输入」串链——
+   容差双约束（相对 5% 且绝对 ≤1000）+ 方向约束（下一轮输入不低于期望 200 token）。
+   并发两条判据——① 出度（一轮在容差内有多个后继，红）；② 同时在场（两链时间交错 + 输入重合 + 两轮时刻接近，红）。
+   分叉候选（黄）= 某个出度点的另一个去向，是线索不是并发本身。标记只活在本次分析里，不落库（需求定案：不落库）。 */
 /* 两个视图互斥——列表态与分析态各管一组控件显隐，切换只走这两个函数（不散在事件里） */
 function showIdList(){
   $('idlist').style.display = '';
@@ -1259,11 +1373,51 @@ function showThreads(){
   $('btnThreadBack').style.display = '';
 }
 
-function renderThreads(r){
-  const box = $('threadlist');
+/* 最近一次分析回包——列表 / 时间轴共用一份（切视图不重拉接口） */
+let threadData = null;
+let threadView = 'list';
+
+/* 摘要与时间轴共用的短时刻（MM-DD HH:mm）——完整时刻太长，一行摘要放不下 */
+function fmtShort(sec){
+  if(!sec) return '—';
+  const d = new Date(sec * 1000);
+  const p = n => String(n).padStart(2, '0');
+  return p(d.getMonth()+1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+}
+
+/* 视图切换单点——列表 / 时间轴的显隐与按钮态只在这里改 */
+function applyThreadView(){
+  const isTime = threadView === 'time';
+  $('tlist').style.display = isTime ? 'none' : '';
+  $('ttime').style.display = isTime ? '' : 'none';
+  $('btnViewList').className = isTime ? '' : 'on';
+  $('btnViewTime').className = isTime ? 'on' : '';
+  if(isTime) renderTimeline(threadData);
+}
+
+/* 总览条——一眼看全：样本 / 链 / 并发 / 候选 / 跨度 + 颜色图例 */
+function renderThreadSummary(r){
+  const box = $('tsum');
+  if(!r || !r.ok || !r.chains || !r.chains.length){ box.innerHTML = ''; return; }
+  let tMin = Infinity, tMax = -Infinity;
+  r.chains.forEach(c => c.steps.forEach(s => {
+    if(s.createdAt < tMin) tMin = s.createdAt;
+    if(s.createdAt > tMax) tMax = s.createdAt;
+  }));
+  box.innerHTML =
+    '<span>样本 <b>' + fmtNum(r.sampleCount) + '</b>/' + fmtNum(r.sampleLimit) + '</span>' +
+    '<span>链 <b>' + fmtNum(r.chainCount) + '</b></span>' +
+    '<span class="red">并发 <b>' + fmtNum(r.concurrentStepCount) + '</b></span>' +
+    '<span class="yellow">候选 <b>' + fmtNum(r.forkCandidateCount || 0) + '</b></span>' +
+    '<span>跨度 ' + esc(fmtShort(tMin)) + ' → ' + esc(fmtShort(tMax)) + '</span>' +
+    '<span class="tlegend"><i class="c"></i>并发<i class="f"></i>候选<i class="n"></i>普通</span>';
+}
+
+/* 链列表——每条链一行摘要（默认折叠），点开看逐轮 */
+function renderThreadList(r){
+  const box = $('tlist');
   if(!r || !r.ok){
-    const msg = (r && r.error) || '接口无响应';
-    box.innerHTML = '<div class="tempty">读取失败：' + esc(msg) + '</div>';
+    box.innerHTML = '<div class="tempty">读取失败：' + esc((r && r.error) || '接口无响应') + '</div>';
     return;
   }
   if(!r.chains || r.chains.length === 0){
@@ -1272,12 +1426,21 @@ function renderThreads(r){
   }
 
   box.innerHTML = r.chains.map(c => {
-    const flag = c.hasConcurrent ? '<span class="tflag">含并发</span>' : '<span class="tflag">单线程</span>';
-    const meta = c.steps.length + ' 轮 · 链首输入 ' + fmtNum(c.steps[0].promptTokens);
+    const first = c.steps[0], last = c.steps[c.steps.length - 1];
+    const nc = c.steps.filter(s => s.concurrent).length;
+    const nf = c.steps.filter(s => s.forkCandidate).length;
+    let flags = '';
+    if(nc) flags += '<span class="tflag red">并发 ' + nc + '</span>';
+    if(nf) flags += '<span class="tflag yellow">候选 ' + nf + '</span>';
+    if(!nc && !nf) flags += '<span class="tflag">单线</span>';
+    const meta = c.steps.length + ' 轮 · ' + fmtShort(first.createdAt) + ' → ' + fmtShort(last.createdAt) +
+      ' · 输入 ' + fmtNum(first.promptTokens) + ' → ' + fmtNum(last.promptTokens);
     const steps = c.steps.map(s => {
-      const reason = s.concurrent ? '<span class="sreason">并发：' + esc(s.concurrentReason) + '</span>' : '';
+      const cls = s.concurrent ? ' concurrent' : (s.forkCandidate ? ' forkcand' : '');
+      const reason = s.concurrent ? '<span class="sreason">并发：' + esc(s.concurrentReason) + '</span>'
+        : (s.forkCandidate ? '<span class="sreason">候选：' + esc(s.forkCandidateReason) + '</span>' : '');
       const site = isAll() ? '<span class="srid">' + esc(s.siteName || '—') + '</span>' : '';
-      return '<div class="tstep' + (s.concurrent ? ' concurrent' : '') + '">' +
+      return '<div class="tstep' + cls + '">' +
         '<span class="sno">#' + (s.index + 1) + '</span>' +
         '<span class="stime">' + esc(fmtTime(s.createdAt)) + '</span>' +
         '<span class="stok">输入 <b>' + fmtNum(s.promptTokens) + '</b></span>' +
@@ -1287,24 +1450,112 @@ function renderThreads(r){
         site + reason +
         '</div>';
     }).join('');
-    return '<div class="threadbox' + (c.hasConcurrent ? ' concurrent' : '') + '">' +
-      '<div class="thead"><span class="tno">#' + (c.index + 1) + '</span>' +
-      '<span class="tname">线程链</span>' + flag +
-      '<span class="tmeta">' + esc(meta) + '</span></div>' +
+    return '<div class="tchain" data-i="' + c.index + '">' +
+      '<div class="thead"><span class="tno">#' + (c.index + 1) + '</span>' + flags +
+      '<span class="tmeta">' + esc(meta) + '</span>' +
+      '<span class="tcaret">▸</span></div>' +
       '<div class="steps">' + steps + '</div>' +
       '</div>';
   }).join('');
+}
+
+/* 时间轴——每链一行，横轴时间；点 = 轮次（红并发 / 黄候选 / 蓝普通），
+   链内相邻轮连线，出度点向各候选画斜线（跨行即分叉） */
+function renderTimeline(r){
+  const box = $('ttime');
+  if(!r || !r.ok || !r.chains || !r.chains.length){ box.innerHTML = ''; return; }
+  const width = Math.max(320, (box.clientWidth || 640) - 4);
+  const padL = 74, padR = 12, padT = 16, rowH = 16;
+  const height = padT + r.chains.length * rowH + 16;
+
+  const at = new Map();     /* 轮序号 → {t, y, s} */
+  let tMin = Infinity, tMax = -Infinity;
+  r.chains.forEach((c, ci) => c.steps.forEach(s => {
+    if(s.createdAt < tMin) tMin = s.createdAt;
+    if(s.createdAt > tMax) tMax = s.createdAt;
+    at.set(s.index, { t: s.createdAt, y: padT + ci * rowH + rowH / 2, s: s });
+  }));
+  const span = Math.max(1, tMax - tMin);
+  const xOf = t => padL + (t - tMin) / span * (width - padL - padR);
+
+  const rows = [];
+  const lines = [];
+  const forks = [];
+  const dots = [];
+  r.chains.forEach((c, ci) => {
+    const y = padT + ci * rowH + rowH / 2;
+    const nc = c.steps.filter(s => s.concurrent).length;
+    rows.push('<rect x="0" y="' + (padT + ci * rowH) + '" width="' + width + '" height="' + rowH + '" fill="transparent" />');
+    rows.push('<text x="2" y="' + (y + 3.5) + '">#' + (c.index + 1) + ' · ' + c.steps.length + ' 轮' +
+      (nc ? ' · 并发 ' + nc : '') + '</text>');
+    for(let i = 1; i < c.steps.length; i++){
+      lines.push('<line x1="' + xOf(c.steps[i-1].createdAt).toFixed(1) + '" y1="' + y + '" x2="' +
+        xOf(c.steps[i].createdAt).toFixed(1) + '" y2="' + y + '" stroke="#3a4656" stroke-width="1" />');
+    }
+  });
+  /* 分叉线——出度点指向它的每个候选（候选可能在别的行上，斜线即跨链） */
+  r.chains.forEach(c => c.steps.forEach(s => {
+    if(!s.concurrent || !s.forkTargets || !s.forkTargets.length) return;
+    const from = at.get(s.index);
+    if(!from) return;
+    s.forkTargets.forEach(ti => {
+      const to = at.get(ti);
+      if(!to) return;
+      forks.push('<line x1="' + xOf(from.t).toFixed(1) + '" y1="' + from.y + '" x2="' + xOf(to.t).toFixed(1) +
+        '" y2="' + to.y + '" stroke="#ff6b6b" stroke-width="0.9" opacity="0.5" />');
+    });
+  }));
+  r.chains.forEach(c => c.steps.forEach(s => {
+    const p = at.get(s.index);
+    if(!p) return;
+    const fill = s.concurrent ? '#ff6b6b' : (s.forkCandidate ? '#e0a33e' : '#6aa9ff');
+    const r0 = s.concurrent ? 3.6 : (s.forkCandidate ? 3 : 2.2);
+    const why = s.concurrent ? '并发：' + s.concurrentReason
+      : (s.forkCandidate ? '候选：' + s.forkCandidateReason : '普通轮');
+    dots.push('<circle cx="' + xOf(p.t).toFixed(1) + '" cy="' + p.y + '" r="' + r0 + '" fill="' + fill + '">' +
+      '<title>#' + (s.index + 1) + ' · ' + fmtTime(s.createdAt) + ' · 输入 ' + fmtNum(s.promptTokens) +
+      ' / 输出 ' + fmtNum(s.completionTokens) + ' · ' + esc(why) + '</title></circle>');
+  }));
+  /* 时间刻度——6 等分，标 MM-DD HH:mm */
+  const ticks = [];
+  for(let i = 0; i <= 6; i++){
+    const t = tMin + span * i / 6;
+    ticks.push('<text x="' + xOf(t).toFixed(1) + '" y="10" text-anchor="middle">' + esc(fmtShort(t)) + '</text>');
+  }
+
+  box.innerHTML = '<svg width="' + width + '" height="' + height + '" viewBox="0 0 ' + width + ' ' + height + '">' +
+    ticks.join('') + rows.join('') + lines.join('') + forks.join('') + dots.join('') + '</svg>';
+}
+
+function renderThreads(r){
+  threadData = r;
+  if(!r || !r.ok){
+    $('tsum').innerHTML = '';
+    $('ttime').innerHTML = '';
+    $('tlist').innerHTML = '<div class="tempty">读取失败：' + esc((r && r.error) || '接口无响应') + '</div>';
+    $('idhint').textContent = '线程分析读取失败：' + ((r && r.error) || '接口无响应');
+    return;
+  }
+  renderThreadSummary(r);
+  renderThreadList(r);
+  if(threadView === 'time') renderTimeline(r);
+  else $('ttime').innerHTML = '';
 
   const hint = '样本 ' + fmtNum(r.sampleCount) + '/' + fmtNum(r.sampleLimit) + ' 条 · 串出 ' +
     fmtNum(r.chainCount) + ' 条链 · 并发轮 ' + fmtNum(r.concurrentStepCount) +
-    ' · 并发链 ' + fmtNum(r.concurrentChainCount) + '（容差 5% · 只分析不落库）';
+    ' · 候选轮 ' + fmtNum(r.forkCandidateCount || 0) +
+    '（相对 5% + 绝对 ≤1000 · 只分析不落库）';
   $('idhint').textContent = hint;
 }
 
 async function loadThreadAnalysis(){
   if(!currentSite) return;
   showThreads();
-  $('threadlist').innerHTML = '<div class="tempty">分析中…</div>';
+  threadView = 'list';
+  $('tsum').innerHTML = '';
+  $('ttime').innerHTML = '';
+  $('tlist').innerHTML = '<div class="tempty">分析中…</div>';
+  applyThreadView();
   const url = '/api/thread-analysis?site=' + encodeURIComponent(currentSite) +
     '&range=' + encodeURIComponent($('range').value);
   const r = await fetch(url).then(x=>x.json()).catch(()=>null);
@@ -1343,6 +1594,21 @@ $('btnFull').onclick = async () => { await saveSettings(); closeSettings(); awai
 /* 请求 ID 明细弹窗 */
 $('btnIdMore').onclick = loadRequestIds;
 $('btnThread').onclick = loadThreadAnalysis;
+/* 线程分析视图内：列表 / 时间轴切换 + 链卡片点开折叠（事件委托，不逐卡绑定） */
+$('btnViewList').onclick = () => { threadView = 'list'; applyThreadView(); };
+$('btnViewTime').onclick = () => { threadView = 'time'; applyThreadView(); };
+$('tlist').onclick = (e) => {
+  const head = e.target.closest('.thead');
+  if(!head) return;
+  const card = head.parentElement;
+  card.classList.toggle('open');
+  const caret = card.querySelector('.tcaret');
+  if(caret) caret.textContent = card.classList.contains('open') ? '▾' : '▸';
+};
+/* 窗口变宽变窄后时间轴要按新宽度重画（横轴是像素映射，不重画就会错位） */
+window.addEventListener('resize', () => {
+  if(threadView === 'time' && $('threadlist').style.display !== 'none') renderTimeline(threadData);
+});
 /* 返回列表——分析视图改写过 hint，故整份列表重拉一次（不残留分析的提示口径） */
 $('btnThreadBack').onclick = () => {
   showIdList();
@@ -1352,11 +1618,16 @@ $('btnThreadBack').onclick = () => {
 };
 $('btnIdClose').onclick = closeRequestIds;
 $('idmask').onclick = (e) => { if(e.target === $('idmask')) closeRequestIds(); };
+/* 过去 24 小时消耗金额弹窗（点「本地消费金额」卡片打开） */
+$('btnAmountClose').onclick = closeAmountHours;
+$('amask').onclick = (e) => { if(e.target === $('amask')) closeAmountHours(); };
 $('cards').onclick = (e) => {
   /* 整卡可拖——拖过就不再当点击（按下即起拖的那一下不该顺手打开弹窗） */
   if(dragMoved) return;
   const card = e.target.closest('.card.clickable');
-  if(card && card.dataset.key === 'requestIds') openRequestIds();
+  if(!card) return;
+  if(card.dataset.key === 'requestIds'){ openRequestIds(); return; }
+  if(card.dataset.key === 'amount'){ openAmountHours(); }
 };
 bindCardDrag();
 

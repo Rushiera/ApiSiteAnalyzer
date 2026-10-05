@@ -680,6 +680,63 @@ public static class ServeRunner
             return Results.Json(MapThreadAnalysis(merged));
         });
 
+        // [段7d] 过去 24 小时的小时桶——「本地消费金额」卡片下方小字点开的子窗口（逐小时展示消耗金额）
+        //         口径 = 滚动 24 小时（与卡片小字、「当前」行、按小时图同一份取数）——三处数字必然相等
+        app.MapGet("/api/amount-hours", (HttpContext context) =>
+        {
+            string siteId = context.Request.Query["site"].ToString();
+
+            string range = context.Request.Query["range"].ToString();
+            if (range.Length == 0)
+            {
+                range = "consume";
+            }
+
+            int[] types = range switch
+            {
+                "all" => Array.Empty<int>(),
+                "consume" => new[] { 2 },
+                _ => new[] { 2 },
+            };
+
+            // [段1] 总览——各站桶按「日期 + 小时」对齐后合并（金额按各站换算比折算后相加）
+            if (IsAllSites(siteId))
+            {
+                using var allDb = new Db(dbPath);
+                List<HourBucket> merged = SiteAggregate.MergeBuckets(allDb, sites, types);
+                return Results.Json(new
+                {
+                    ok = true,
+                    site = new
+                    {
+                        id = AllSitesKey,
+                        displayName = "总览（全部站点）",
+                        currencySymbol = SiteAggregate.SymbolOf(sites),
+                        quotaPerUnit = 0,
+                    },
+                    hours = merged.Select(b => MapBucket(b, 0, true)),
+                    total = MapBucketTotal(merged, 0, true),
+                });
+            }
+
+            IApiSite? site = FindSite(sites, siteId);
+            if (site is null)
+            {
+                return Results.Json(new { ok = false, error = "未知站点：" + siteId });
+            }
+
+            using var db = new Db(dbPath);
+            List<HourBucket> buckets = db.RollingBuckets(site.Id, types);
+            double unit = site.QuotaPerUnit <= 0 ? 500000 : site.QuotaPerUnit;
+            return Results.Json(new
+            {
+                ok = true,
+                site = new { id = site.Id, displayName = site.DisplayName, currencySymbol = site.CurrencySymbol, quotaPerUnit = unit },
+                hours = buckets.Select(b => MapBucket(b, unit, false)),
+                total = MapBucketTotal(buckets, unit, false),
+            });
+        });
+
         // [段8] 启动浏览器并打地址
         string url = "http://127.0.0.1:" + config.Port + "/";
         Console.WriteLine("ApiSiteAnalyzer 面板已启动：" + url);
@@ -924,6 +981,49 @@ public static class ServeRunner
         };
     }
 
+    /// <summary>把小时桶映射成前端结构（子窗口逐行用——金额口径与调用方一致：单站现算 / 总览取合并值）。</summary>
+    /// <param name="bucket">小时桶。</param>
+    /// <param name="unit">每货币单位 quota 数（总览传 0——金额取桶内已折算值）。</param>
+    /// <param name="merged">是否跨站合并行（true = 金额取桶内已折算值）。</param>
+    /// <returns>前端结构。</returns>
+    private static object MapBucket(HourBucket bucket, double unit, bool merged)
+    {
+        return new
+        {
+            day = bucket.Day,
+            hour = bucket.Hour,
+            count = bucket.Count,
+            quota = bucket.Quota,
+            amount = merged ? bucket.Amount : bucket.Quota / unit,
+            promptTokens = bucket.PromptTokens,
+            completionTokens = bucket.CompletionTokens,
+            cacheTokens = bucket.CacheTokens,
+            requestIdCount = bucket.RequestIdCount,
+        };
+    }
+
+    /// <summary>把小时桶列表合计成一行（子窗口标题的「合计」用它——与逐行数字同源，前端不自行累加）。</summary>
+    /// <param name="buckets">小时桶。</param>
+    /// <param name="unit">每货币单位 quota 数（总览传 0——金额取合并值）。</param>
+    /// <param name="merged">是否跨站合并（true = 金额取桶内已折算值）。</param>
+    /// <returns>合计行。</returns>
+    private static object MapBucketTotal(List<HourBucket> buckets, double unit, bool merged)
+    {
+        long count = 0;
+        long quota = 0;
+        long requestIds = 0;
+        double amount = 0;
+        foreach (HourBucket bucket in buckets)
+        {
+            count += bucket.Count;
+            quota += bucket.Quota;
+            requestIds += bucket.RequestIdCount;
+            amount += merged ? bucket.Amount : bucket.Quota / unit;
+        }
+
+        return new { count = count, quota = quota, amount = amount, requestIdCount = requestIds };
+    }
+
     /// <summary>把聚合行映射成前端结构（单站口径——额度按本站换算比折算）。</summary>
     /// <param name="row">聚合行。</param>
     /// <param name="unit">每货币单位 quota 数。</param>
@@ -1064,10 +1164,12 @@ public static class ServeRunner
             chainCount = result.ChainCount,
             concurrentStepCount = result.ConcurrentStepCount,
             concurrentChainCount = result.ConcurrentChainCount,
+            forkCandidateCount = result.ForkCandidateCount,
             chains = result.Chains.Select(chain => new
             {
                 index = chain.Index,
                 hasConcurrent = chain.HasConcurrent,
+                hasForkCandidate = chain.HasForkCandidate,
                 steps = chain.Steps.Select(step => new
                 {
                     index = step.Index,
@@ -1080,6 +1182,9 @@ public static class ServeRunner
                     siteName = step.SiteName,
                     concurrent = step.Concurrent,
                     concurrentReason = step.ConcurrentReason,
+                    forkCandidate = step.ForkCandidate,
+                    forkCandidateReason = step.ForkCandidateReason,
+                    forkTargets = step.ForkTargets,
                 }),
             }),
         };

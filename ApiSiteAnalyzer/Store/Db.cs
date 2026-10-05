@@ -96,6 +96,37 @@ public sealed class AggregateRow
     public long RequestIdCount { get; set; }
 }
 
+/// <summary>小时桶——滚动 24 小时视图的一行（日期 + 小时 + 该小时的聚合）。</summary>
+public sealed class HourBucket
+{
+    /// <summary>日期（yyyy-MM-dd，本地时区）。</summary>
+    public string Day { get; set; } = "";
+
+    /// <summary>小时（0–23，本地时区）。</summary>
+    public int Hour { get; set; }
+
+    /// <summary>条数。</summary>
+    public long Count { get; set; }
+
+    /// <summary>额度合计（原始 quota）。</summary>
+    public long Quota { get; set; }
+
+    /// <summary>折算金额（跨站合并时按各站换算比折算后累加；单站由 Web 层按该站换算比现算，此处恒为 0）。</summary>
+    public double Amount { get; set; }
+
+    /// <summary>输入 token 合计。</summary>
+    public long PromptTokens { get; set; }
+
+    /// <summary>输出 token 合计。</summary>
+    public long CompletionTokens { get; set; }
+
+    /// <summary>缓存 token 合计。</summary>
+    public long CacheTokens { get; set; }
+
+    /// <summary>已探明请求 ID 数（去重——口径与总览卡片一致）。</summary>
+    public long RequestIdCount { get; set; }
+}
+
 /// <summary>时间窗口统计（近 24 小时 / 前 24 小时）——卡片四项的窗口口径。</summary>
 public sealed class WindowStat
 {
@@ -865,6 +896,70 @@ ON CONFLICT (site_id) DO UPDATE SET fetched_at=excluded.fetched_at, total_count=
         }
 
         return filled;
+    }
+    /// <summary>
+    /// 滚动 24 小时的小时桶——按**时间先后**铺满 24 个小时（昨天 当前时+1 时 → 今天 当前时），每桶带日期与小时。
+    /// 与「当前」口径**同源**（复用 ByHour 的滚动取数）——卡片数字与子窗口合计因此必然相等。
+    /// 近两天都无记录时返回空表（面板显示「暂无数据」——与按小时图同一判据）。
+    /// </summary>
+    /// <param name="siteId">站点键。</param>
+    /// <param name="types">记录类型白名单。</param>
+    /// <returns>小时桶（时间升序；近两天无记录时为空表）。</returns>
+    public List<HourBucket> RollingBuckets(string siteId, IReadOnlyList<int> types)
+    {
+        List<AggregateRow> rows = ByHour(siteId, types, "");
+        if (rows.Count == 0)
+        {
+            return new List<HourBucket>();
+        }
+
+        var byHour = new Dictionary<string, AggregateRow>(StringComparer.Ordinal);
+        foreach (AggregateRow row in rows)
+        {
+            byHour[row.Name] = row;
+        }
+
+        DateTime now = DateTime.Now;
+        string today = now.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        string yesterday = now.AddDays(-1).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+
+        var buckets = new List<HourBucket>();
+        // [段1] 昨天部分——当前时之后的小时（今天还没到，取昨天）
+        for (int hour = now.Hour + 1; hour < 24; hour = hour + 1)
+        {
+            buckets.Add(MakeBucket(byHour, yesterday, hour));
+        }
+
+        // [段2] 今天部分——当前时及之前的小时（今天已过）
+        for (int hour = 0; hour <= now.Hour; hour = hour + 1)
+        {
+            buckets.Add(MakeBucket(byHour, today, hour));
+        }
+
+        return buckets;
+    }
+
+    /// <summary>按「小时」取聚合行并装成桶（缺行即全 0 桶——空档不跳档）。</summary>
+    /// <param name="byHour">「两位小时 → 聚合行」表。</param>
+    /// <param name="day">该桶所属日期（yyyy-MM-dd）。</param>
+    /// <param name="hour">小时（0–23）。</param>
+    /// <returns>小时桶。</returns>
+    private static HourBucket MakeBucket(Dictionary<string, AggregateRow> byHour, string day, int hour)
+    {
+        string key = hour.ToString("00", CultureInfo.InvariantCulture);
+        var bucket = new HourBucket { Day = day, Hour = hour };
+        AggregateRow? hit = null;
+        if (byHour.TryGetValue(key, out hit))
+        {
+            bucket.Count = hit.Count;
+            bucket.Quota = hit.Quota;
+            bucket.PromptTokens = hit.PromptTokens;
+            bucket.CompletionTokens = hit.CompletionTokens;
+            bucket.CacheTokens = hit.CacheTokens;
+            bucket.RequestIdCount = hit.RequestIdCount;
+        }
+
+        return bucket;
     }
     /// <summary>把「小时 → 聚合行」的查询结果铺成 00–23 全 24 行（无记录小时补 0 行——横轴连续，不跳档）。</summary>
     /// <param name="rows">按小时聚合的行（Name = 两位小时）。</param>

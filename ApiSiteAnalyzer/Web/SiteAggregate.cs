@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using ApiSiteAnalyzer.Sites;
 using ApiSiteAnalyzer.Store;
@@ -216,7 +217,6 @@ public static class SiteAggregate
     {
         var result = new AllSitesResult();
         var recent = new List<UsageRecord>();
-        var symbols = new HashSet<string>(StringComparer.Ordinal);
 
         foreach (IApiSite site in sites)
         {
@@ -235,7 +235,6 @@ public static class SiteAggregate
             // 窗口金额——各站按自己的换算比折算后相加（跨站 quota 单位不同，不能先加 quota 再除）
             result.Last24hAmount += overview.Last24h.Quota / unit;
             result.Prev24hAmount += overview.Prev24h.Quota / unit;
-            symbols.Add(site.CurrencySymbol);
 
             // [段1] 分组行——各站取全量（limit=0）再合并，合并后按 token 之和倒序截断（截断放在合并之后，避免漏掉跨站前排）
             Merge(result.ByModel, db.ByModel(site.Id, types, 0), unit);
@@ -294,8 +293,70 @@ public static class SiteAggregate
         result.ByHour = result.ByHour.OrderBy(r => r.Name, StringComparer.Ordinal).ToList();
 
         // [段5] 货币符号——各站一致才标；混币种留空（金额是各站折算后相加，标单一符号会误导）
-        result.CurrencySymbol = symbols.Count == 1 ? symbols.First() : "";
+        result.CurrencySymbol = SymbolOf(sites);
         return result;
+    }
+
+    /// <summary>货币符号——各站一致才有值；混币种留空（金额是各站折算后相加，标单一符号会误导）。</summary>
+    /// <param name="sites">站点清单。</param>
+    /// <returns>货币符号（空 = 混币种或无站点）。</returns>
+    public static string SymbolOf(IReadOnlyList<IApiSite> sites)
+    {
+        var symbols = new HashSet<string>(StringComparer.Ordinal);
+        foreach (IApiSite site in sites)
+        {
+            symbols.Add(site.CurrencySymbol);
+        }
+
+        return symbols.Count == 1 ? symbols.First() : "";
+    }
+
+    /// <summary>
+    /// 合并各站的滚动 24 小时小时桶——按「日期 + 小时」对齐（各站同一时刻的桶同键），
+    /// 金额按各站换算比折算后累加（跨站 quota 单位不同，不能先加 quota 再除）。
+    /// 全部站点近两天都无记录时返回空表。
+    /// </summary>
+    /// <param name="db">库（唯一真相）。</param>
+    /// <param name="sites">站点清单。</param>
+    /// <param name="types">记录类型白名单（空 = 全部）。</param>
+    /// <returns>小时桶（时间升序）。</returns>
+    public static List<HourBucket> MergeBuckets(Db db, IReadOnlyList<IApiSite> sites, IReadOnlyList<int> types)
+    {
+        var order = new List<string>();
+        var merged = new Dictionary<string, HourBucket>(StringComparer.Ordinal);
+        foreach (IApiSite site in sites)
+        {
+            double unit = site.QuotaPerUnit <= 0 ? 500000 : site.QuotaPerUnit;
+            foreach (HourBucket one in db.RollingBuckets(site.Id, types))
+            {
+                string key = one.Day + " " + one.Hour.ToString("00", CultureInfo.InvariantCulture);
+                HourBucket? hit = null;
+                if (!merged.TryGetValue(key, out hit))
+                {
+                    hit = new HourBucket { Day = one.Day, Hour = one.Hour };
+                    merged[key] = hit;
+                    order.Add(key);
+                }
+
+                hit.Count += one.Count;
+                hit.Quota += one.Quota;
+                hit.Amount += one.Quota / unit;
+                hit.PromptTokens += one.PromptTokens;
+                hit.CompletionTokens += one.CompletionTokens;
+                hit.CacheTokens += one.CacheTokens;
+                hit.RequestIdCount += one.RequestIdCount;
+            }
+        }
+
+        // 时间先后序——键是「日期 + 两位小时」，字典序即时间序
+        order.Sort(StringComparer.Ordinal);
+        var list = new List<HourBucket>();
+        foreach (string key in order)
+        {
+            list.Add(merged[key]);
+        }
+
+        return list;
     }
 
     /// <summary>把一站的窗口统计并入目标（各字段相加——窗口口径下跨站直接累加）。</summary>
