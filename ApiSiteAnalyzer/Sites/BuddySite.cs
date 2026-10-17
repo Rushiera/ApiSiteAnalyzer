@@ -70,6 +70,13 @@ public sealed class BuddySite : IApiSite
     /// <summary>登录页地址（前端路由 `/login`——首页是兑换页，不是登录入口）。</summary>
     public string LoginUrl => _baseUrl + "/login";
 
+    /// <summary>
+    /// 站点口径换算比——**250 积分 = 1 元**，机械写死在本适配器里（不读站点数据推导、不进 config.json）。
+    /// 理由：本站是订阅卡（余额恒 0、充值是兑换码而非现金），站点前端的「积分」展示值带分组倍率与活动口径，
+    /// 由它反推「花了多少钱」会漂；金额一律按这个固定比从积分算回来——我们自己算。
+    /// </summary>
+    public const double PointsPerYuan = 250;
+
     /// <summary>每货币单位对应的 quota 数（本站 100 0000 = 1 元，即 quota 单位为微元，精度到 1e-6 元）。</summary>
     public double QuotaPerUnit => _quotaPerUnit;
 
@@ -86,10 +93,11 @@ public sealed class BuddySite : IApiSite
     public string BalanceUnit => "积分";
 
     /// <summary>
-    /// 余额位显示除数——库内记的余额位仍是 quota（微元，1 元 = 1e6 quota，金额口径不变），
-    /// 展示时按站点前端公式换成积分：`积分 = round(元 × 1000) / 4` ⇒ `积分 = quota / 4000`。
+    /// 余额位显示除数——库内记的余额位仍是 quota（微元），展示时按**写死的换算比**换成积分：
+    /// `1 积分 = quotaPerUnit / PointsPerYuan`（1e6 / 250 = 4000）。由常量派生，不另抄一个魔数。
+    /// 站点前端的展示公式（`round(元×1000)/4`）只是它的等价形态，不作为取数依据——见 `PointsPerYuan`。
     /// </summary>
-    public double BalanceScale => 4000;
+    public double BalanceScale => _quotaPerUnit / PointsPerYuan;
 
     /// <summary>
     /// 登录态探针——在页面上下文内取 localStorage 的 JWT，读账户信息，并取**累计消耗积分**作为余额位。
@@ -124,14 +132,15 @@ public sealed class BuddySite : IApiSite
         }
       }
     } catch (e) {}
-    /* [段2] 余额位口径——本站是订阅卡（balance 恒 0，余额位没信息量），改报**累计消耗积分**。
-       站点前端口径（实测资产包）：积分 = round(元 × 1000) / 4；本程序库内余额位仍是微元 quota，
-       故先把积分折回 quota（× 4000），展示时按 BalanceScale 除回来——换算往返无损。 */
-    var points = Math.round(used * 1000) / 4;
+    /* [段2] 余额位口径——本站是订阅卡（balance 恒 0，余额位没信息量），改报**累计消耗**。
+       金额与积分的换算比**写死在适配器里**（PointsPerYuan = 250 积分 = 1 元）：充值走兑换码、
+       站点不给现金余额，「充了多少钱」无法由站点数据反推，故一律按固定比自算。
+       这里只落「消耗的金额」（微元），积分由 BalanceScale（= quotaPerUnit / 250）在展示层除回——
+       不再走站点前端那套 round(元×1000)/4（它会量化到 0.25 积分，精度反而低）。 */
     return JSON.stringify({ loggedIn: true,
       username: u.username || u.name || u.nickname || u.email || ('#' + (u.id || 0)),
       userId: u.id || 0,
-      quota: Math.round(points * 4000),
+      quota: Math.round(used * 1000000),
       usedQuota: Math.round(used * 1000000),
       requestCount: count,
       group: u.group || u.plan || '',
@@ -393,7 +402,11 @@ public sealed class BuddySite : IApiSite
         row.IsStream = string.Equals(ReadText(root, "request_type"), "stream", StringComparison.OrdinalIgnoreCase)
             || (root.TryGetProperty("stream", out JsonElement stream) && stream.ValueKind == JsonValueKind.True);
 
-        // [段1] 金额——actual_cost 已是该站最终金额（元，含倍率与峰谷）；按 QuotaPerUnit 折成整数 quota 落库
+        // [段1] 金额——actual_cost 已是该站最终金额；按 QuotaPerUnit 折成整数 quota 落库。
+        //        🔴 金额与「积分」的换算比**写死**在本适配器（PointsPerYuan = 250 积分 = 1 元）：
+        //        本站是订阅卡，充值走兑换码、站点不给现金余额，「充了多少钱」无法由站点数据反推——
+        //        故一律按这个常量自算（`积分 = 元 × 250`）。逐条金额仍取 actual_cost 的高精度值，
+        //        不用整数化后的「积分」反算（积分最小刻度 0.25，单条反算误差可达 2 倍）。
         double cost = ReadDouble(root, "actual_cost");
         if (cost <= 0)
         {

@@ -654,7 +654,8 @@ function renderBalance(balance){
     const scale = Number(s.balanceScale) > 0 ? Number(s.balanceScale) : 1;
     const value = Number(balance) / scale;
     $('balanceMain').textContent = value.toLocaleString('zh-CN', {maximumFractionDigits: 2}) + ' ' + s.balanceUnit;
-    $('balanceSide').innerHTML = '站点口径 · 原始 <b>' + fmtNum(balance) + '</b> · 换算 <b>1 ' + esc(s.balanceUnit) + ' = ' + fmtNum(scale) + '</b>';
+    $('balanceSide').innerHTML = '站点口径 · 原始 <b>' + fmtNum(balance) + '</b> · 换算 <b>1 ' + esc(s.currencySymbol) +
+      ' = ' + fmtNum(Math.round((Number(s.quotaPerUnit) / scale) * 100) / 100) + ' ' + esc(s.balanceUnit) + '（本地写死）</b>';
     return;
   }
   const sym = s.currencySymbol;
@@ -763,7 +764,7 @@ function renderCards(o, sym, cur){
   const items = [
     ['已探明请求 ID', fmtNum(o.requestIdCount), 'requestIds'],
     ['本地消费金额', fmtAmount(o.amount, sym), 'amount',
-      '<div class="hourline"><span>过去 24 小时</span><span>' + fmtAmount(cur ? cur.amount : 0, sym) + '</span></div>'],
+      '<div class="hourline"><span>过去 24 小时</span><span>' + fmtAmount(cur ? cur.amount : 0, sym) + '</span></div>' + amountBasisLine(o.amount)],
     [win + '平均首字延迟', Math.round(o.recentAvgFirstTokenMs) + ' ms', null, deltaLine(o.recentAvgFirstTokenMs, o.prevAvgFirstTokenMs, pc, true, Math.round(o.prevAvgFirstTokenMs) + ' ms')],
     [win + '平均耗时', fmtNum(Math.round(o.recentAvgUseTime*1000)) + ' ms', null, deltaLine(o.recentAvgUseTime, o.prevAvgUseTime, pc, true, fmtNum(Math.round(o.prevAvgUseTime*1000)) + ' ms')],
     ['输出 Token', fmtNum(o.completionTokens)],
@@ -884,7 +885,23 @@ function bindCardDrag(){
   });
 }
 
-/* 输入下方小黄字（最近记录列与「输入 Token」卡片共用）：A（命中缓存 B）——A = 输入 − 缓存（未命中部分），B = 缓存 token */
+/* 「本地消费金额」卡片的口径行——该站若自报了非货币的余额位单位（如知序空间的「积分」），
+   就把「金额 ↔ 单位」的固定比与折算结果一起写出来：这个比是**本地写死**的（不读站点数据推导），
+   金额由它自算，读者一眼能看出「这个金额是从哪来的、折成站点单位是多少」。
+   货币站不挂这一行（没什么可解释的）。 */
+function amountBasisLine(amount){
+  const s = siteMap[currentSite];
+  if(!s || !s.balanceUnit) return '';
+  const scale = Number(s.balanceScale) > 0 ? Number(s.balanceScale) : 1;
+  const unit = Number(s.quotaPerUnit) > 0 ? Number(s.quotaPerUnit) : 0;
+  if(!unit) return '';
+  const perYuan = Math.round((unit / scale) * 100) / 100;
+  const same = Number(amount) * perYuan;
+  return '<div class="deltaline"><span>口径 1 ' + esc(s.currencySymbol) + ' = ' + fmtNum(perYuan) + ' ' + esc(s.balanceUnit) +
+    '（本地写死）· 折 ' + fmtNum(Math.round(same * 100) / 100) + ' ' + esc(s.balanceUnit) + '</span></div>';
+}
+
+
 function cacheLine(r){
   const p = r.promptTokens || 0;
   if(p <= 0) return '';
@@ -992,7 +1009,8 @@ function renderSiteBlocks(sites){
       if(s.balanceUnit){
         const scale = Number(s.balanceScale) > 0 ? Number(s.balanceScale) : 1;
         bal = '<span class="bal">' + esc((Number(s.balance) / scale).toLocaleString('zh-CN', {maximumFractionDigits: 2}) + ' ' + s.balanceUnit) + '</span>';
-        sub = balLabel + ' · 原始 ' + fmtNum(s.balance) + ' · 1 ' + esc(s.balanceUnit) + ' = ' + fmtNum(scale);
+        sub = balLabel + ' · 原始 ' + fmtNum(s.balance) + ' · 1 ' + esc(s.currencySymbol) + ' = ' +
+          fmtNum(Math.round((Number(s.quotaPerUnit) / scale) * 100) / 100) + ' ' + esc(s.balanceUnit) + '（本地写死）';
       }else{
         bal = '<span class="bal">' + esc(fmtAmount8(s.balance / s.quotaPerUnit, s.currencySymbol)) + '</span>';
         sub = '原始 ' + fmtNum(s.balance) + ' quota · 1 ' + esc(s.currencySymbol) + ' = ' + fmtNum(s.quotaPerUnit) + ' quota';
