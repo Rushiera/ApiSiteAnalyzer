@@ -39,6 +39,8 @@ public static class PageWriter
             UpstreamModel = row.UpstreamModel,
             RequestId = row.RequestId,
             Content = row.Content,
+            ReasoningEffort = row.ReasoningEffort,
+            SessionId = row.SessionId,
         };
     }
 

@@ -1166,6 +1166,8 @@ public static class ServeRunner
             requestId = record.RequestId,
             upstreamModel = record.UpstreamModel,
             content = record.Content,
+            reasoningEffort = record.ReasoningEffort,
+            sessionId = record.SessionId,
         };
     }
     /// <summary>

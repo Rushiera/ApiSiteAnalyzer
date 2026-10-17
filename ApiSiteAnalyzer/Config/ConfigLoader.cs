@@ -22,7 +22,7 @@ public sealed class SiteConfig
     /// <summary>站点键（库内唯一）。</summary>
     public string Id { get; set; } = "";
 
-    /// <summary>适配器类型（当前仅 newapi）。</summary>
+    /// <summary>适配器类型（`newapi` = New API 系 · `buddy` = 知序空间）。</summary>
     public string Type { get; set; } = "newapi";
 
     /// <summary>显示名。</summary>
@@ -163,9 +163,9 @@ public static class ConfigLoader
             throw new ConfigException("站点 " + site.Id + " 缺 baseUrl");
         }
 
-        if (!string.Equals(site.Type, "newapi", StringComparison.OrdinalIgnoreCase))
+        if (!IsKnownType(site.Type))
         {
-            throw new ConfigException("站点 " + site.Id + " 的 type 非法（当前仅支持 newapi）：" + site.Type);
+            throw new ConfigException("站点 " + site.Id + " 的 type 非法（支持 newapi / buddy）：" + site.Type);
         }
 
         if (site.DisplayName.Length == 0)
@@ -174,6 +174,15 @@ public static class ConfigLoader
         }
 
         return site;
+    }
+
+    /// <summary>适配器类型是否已知（新增站点类型时在此登记）。</summary>
+    /// <param name="type">配置里的 type 值。</param>
+    /// <returns>是否已知。</returns>
+    private static bool IsKnownType(string type)
+    {
+        return string.Equals(type, "newapi", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(type, "buddy", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>站点键查重。</summary>

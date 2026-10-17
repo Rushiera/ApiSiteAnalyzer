@@ -68,6 +68,12 @@ public sealed class UsageRecord
 
     /// <summary>记录正文。</summary>
     public string Content { get; set; } = "";
+
+    /// <summary>思考档位（站点原值；空 = 站点没给）。</summary>
+    public string ReasoningEffort { get; set; } = "";
+
+    /// <summary>会话标识（站点原值；空 = 站点没给）。</summary>
+    public string SessionId { get; set; } = "";
 }
 
 /// <summary>聚合行——分组统计的通用载体（名称 + 计数 + 额度 + token）。</summary>
@@ -207,7 +213,11 @@ public sealed class OverviewStat
 /// </summary>
 public sealed class Db : IDisposable
 {
-    /// <summary>当前库结构版本（结构变更时递增——不匹配则备份旧库并重建）。</summary>
+    /// <summary>
+    /// 当前库结构版本（**仅破坏性变更时递增**——不匹配则备份旧库并重建）。
+    /// v2 起：加列（如 <c>reasoning_effort</c> / <c>session_id</c>）走 <c>EnsureColumn</c> 的向后兼容演进，**不动版本号**——
+    /// 版本号一涨，还在跑的旧槽会把这库整体备份重建（数据全丢、需重拉）。
+    /// </summary>
     private const int SchemaVersion = 2;
     /// <summary>按天图表的补齐窗口（天）——记录跨度超过它时只铺最近这么多天。</summary>
     private const int ByDayWindowDays = 31;
@@ -337,6 +347,8 @@ CREATE TABLE IF NOT EXISTS usage_log (
   upstream_model    TEXT    NOT NULL DEFAULT '',
   request_id        TEXT    NOT NULL DEFAULT '',
   content           TEXT    NOT NULL DEFAULT '',
+  reasoning_effort  TEXT    NOT NULL DEFAULT '',
+  session_id        TEXT    NOT NULL DEFAULT '',
   PRIMARY KEY (site_id, log_key)
 );
 CREATE INDEX IF NOT EXISTS idx_usage_site_created ON usage_log (site_id, created_at DESC);
@@ -360,6 +372,36 @@ CREATE TABLE IF NOT EXISTS site_snapshot (
 );
 ";
         cmd.ExecuteNonQuery();
+
+        // [段1] 加列式演进——**不改结构版本**：旧版程序按显式列清单读写（多出的列它看不见），
+        //        故加列是向后兼容的；反之递增版本会让还在运行的旧槽把库整体备份重建（数据全丢、需重拉）。
+        //        破坏性变更（删列 / 改类型 / 改主键）才递增 SchemaVersion。
+        EnsureColumn("usage_log", "reasoning_effort", "TEXT NOT NULL DEFAULT ''");
+        EnsureColumn("usage_log", "session_id", "TEXT NOT NULL DEFAULT ''");
+    }
+
+    /// <summary>缺列则加列（幂等）——<c>PRAGMA table_info</c> 判定，缺才 <c>ALTER TABLE ADD COLUMN</c>。</summary>
+    /// <param name="table">表名。</param>
+    /// <param name="column">列名。</param>
+    /// <param name="definition">列定义（含类型与默认值）。</param>
+    private void EnsureColumn(string table, string column, string definition)
+    {
+        using (var probe = _conn.CreateCommand())
+        {
+            probe.CommandText = "PRAGMA table_info(" + table + ");";
+            using var reader = probe.ExecuteReader();
+            while (reader.Read())
+            {
+                if (string.Equals(reader.GetString(1), column, StringComparison.OrdinalIgnoreCase))
+                {
+                    return;
+                }
+            }
+        }
+
+        using var alter = _conn.CreateCommand();
+        alter.CommandText = "ALTER TABLE " + table + " ADD COLUMN " + column + " " + definition + ";";
+        alter.ExecuteNonQuery();
     }
 
     /// <summary>批量写入（幂等）——同 (site_id, log_key) 覆盖更新。</summary>
@@ -378,17 +420,18 @@ CREATE TABLE IF NOT EXISTS site_snapshot (
         cmd.CommandText = @"
 INSERT INTO usage_log (site_id, log_key, remote_id, created_at, type, model_name, token_name, group_name,
   quota, prompt_tokens, completion_tokens, cache_tokens, use_time, first_token_ms, speed_tps, is_stream,
-  channel, upstream_model, request_id, content)
+  channel, upstream_model, request_id, content, reasoning_effort, session_id)
 VALUES ($site, $key, $rid, $created, $type, $model, $token, $grp,
   $quota, $pt, $ct, $cache, $use, $frt, $tps, $stream,
-  $channel, $upstream, $reqid, $content)
+  $channel, $upstream, $reqid, $content, $effort, $session)
 ON CONFLICT (site_id, log_key) DO UPDATE SET
   remote_id=excluded.remote_id, created_at=excluded.created_at, type=excluded.type,
   model_name=excluded.model_name, token_name=excluded.token_name, group_name=excluded.group_name,
   quota=excluded.quota, prompt_tokens=excluded.prompt_tokens, completion_tokens=excluded.completion_tokens,
   cache_tokens=excluded.cache_tokens, use_time=excluded.use_time, first_token_ms=excluded.first_token_ms,
   speed_tps=excluded.speed_tps, is_stream=excluded.is_stream, channel=excluded.channel,
-  upstream_model=excluded.upstream_model, request_id=excluded.request_id, content=excluded.content;
+  upstream_model=excluded.upstream_model, request_id=excluded.request_id, content=excluded.content,
+  reasoning_effort=excluded.reasoning_effort, session_id=excluded.session_id;
 ";
 
         var pSite = cmd.Parameters.Add("$site", SqliteType.Text);
@@ -411,6 +454,8 @@ ON CONFLICT (site_id, log_key) DO UPDATE SET
         var pUpstream = cmd.Parameters.Add("$upstream", SqliteType.Text);
         var pReqId = cmd.Parameters.Add("$reqid", SqliteType.Text);
         var pContent = cmd.Parameters.Add("$content", SqliteType.Text);
+        var pEffort = cmd.Parameters.Add("$effort", SqliteType.Text);
+        var pSession = cmd.Parameters.Add("$session", SqliteType.Text);
 
         int written = 0;
         foreach (UsageRecord record in records)
@@ -435,6 +480,8 @@ ON CONFLICT (site_id, log_key) DO UPDATE SET
             pUpstream.Value = record.UpstreamModel;
             pReqId.Value = record.RequestId;
             pContent.Value = record.Content;
+            pEffort.Value = record.ReasoningEffort;
+            pSession.Value = record.SessionId;
             written += cmd.ExecuteNonQuery();
         }
 
@@ -699,7 +746,7 @@ ON CONFLICT (site_id) DO UPDATE SET fetched_at=excluded.fetched_at, total_count=
         string filter = BuildTypeFilter(cmd, types);
         cmd.CommandText = "SELECT remote_id, created_at, type, model_name, token_name, group_name, quota, " +
             "prompt_tokens, completion_tokens, cache_tokens, use_time, first_token_ms, speed_tps, is_stream, channel, " +
-            "upstream_model, request_id, content FROM (" +
+            "upstream_model, request_id, content, reasoning_effort, session_id FROM (" +
             "SELECT *, ROW_NUMBER() OVER (PARTITION BY request_id ORDER BY created_at DESC, log_key ASC) AS rn " +
             "FROM usage_log WHERE site_id=$site AND request_id <> ''" + filter + ") " +
             "WHERE rn = 1 ORDER BY created_at DESC, request_id ASC LIMIT " + limit + " OFFSET " + offset + ";";
@@ -729,6 +776,8 @@ ON CONFLICT (site_id) DO UPDATE SET fetched_at=excluded.fetched_at, total_count=
                 UpstreamModel = reader.GetString(15),
                 RequestId = reader.GetString(16),
                 Content = reader.GetString(17),
+                ReasoningEffort = reader.GetString(18),
+                SessionId = reader.GetString(19),
             });
         }
 
@@ -1048,7 +1097,7 @@ ON CONFLICT (site_id) DO UPDATE SET fetched_at=excluded.fetched_at, total_count=
 
             cmd.CommandText = "SELECT site_id, log_key, remote_id, created_at, type, model_name, token_name, group_name, " +
                 "quota, prompt_tokens, completion_tokens, cache_tokens, use_time, first_token_ms, speed_tps, is_stream, " +
-                "channel, upstream_model, request_id, content FROM usage_log " +
+                "channel, upstream_model, request_id, content, reasoning_effort, session_id FROM usage_log " +
                 "WHERE site_id=$site AND log_key IN (" + string.Join(",", names) + ");";
             cmd.Parameters.AddWithValue("$site", records[0].SiteId);
 
@@ -1100,6 +1149,8 @@ ON CONFLICT (site_id) DO UPDATE SET fetched_at=excluded.fetched_at, total_count=
             UpstreamModel = reader.GetString(17),
             RequestId = reader.GetString(18),
             Content = reader.GetString(19),
+            ReasoningEffort = reader.GetString(20),
+            SessionId = reader.GetString(21),
         };
     }
 
@@ -1130,7 +1181,9 @@ ON CONFLICT (site_id) DO UPDATE SET fetched_at=excluded.fetched_at, total_count=
             left.Channel != right.Channel ||
             !string.Equals(left.UpstreamModel, right.UpstreamModel, StringComparison.Ordinal) ||
             !string.Equals(left.RequestId, right.RequestId, StringComparison.Ordinal) ||
-            !string.Equals(left.Content, right.Content, StringComparison.Ordinal))
+            !string.Equals(left.Content, right.Content, StringComparison.Ordinal) ||
+            !string.Equals(left.ReasoningEffort, right.ReasoningEffort, StringComparison.Ordinal) ||
+            !string.Equals(left.SessionId, right.SessionId, StringComparison.Ordinal))
         {
             return false;
         }
@@ -1203,7 +1256,7 @@ ON CONFLICT (site_id) DO UPDATE SET fetched_at=excluded.fetched_at, total_count=
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = "SELECT remote_id, created_at, type, model_name, token_name, group_name, quota, " +
             "prompt_tokens, completion_tokens, cache_tokens, use_time, first_token_ms, speed_tps, is_stream, channel, " +
-            "upstream_model, request_id, content FROM usage_log WHERE site_id=$site" +
+            "upstream_model, request_id, content, reasoning_effort, session_id FROM usage_log WHERE site_id=$site" +
             BuildTypeFilter(cmd, types) + " ORDER BY created_at DESC, remote_id DESC LIMIT " + limit + ";";
         cmd.Parameters.AddWithValue("$site", siteId);
 
@@ -1231,6 +1284,8 @@ ON CONFLICT (site_id) DO UPDATE SET fetched_at=excluded.fetched_at, total_count=
                 UpstreamModel = reader.GetString(15),
                 RequestId = reader.GetString(16),
                 Content = reader.GetString(17),
+                ReasoningEffort = reader.GetString(18),
+                SessionId = reader.GetString(19),
             });
         }
 

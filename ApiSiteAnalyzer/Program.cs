@@ -34,12 +34,17 @@ public static class Program
 
         // [段1] 选项与位置参数分开——`fetch --full` 里 --full 不是配置文件路径
         bool fullScan = false;
+        string siteFilter = "";
         string configArg = "";
         for (int i = 1; i < args.Length; i++)
         {
             if (string.Equals(args[i], "--full", StringComparison.OrdinalIgnoreCase))
             {
                 fullScan = true;
+            }
+            else if (args[i].StartsWith("--site=", StringComparison.OrdinalIgnoreCase))
+            {
+                siteFilter = args[i].Substring("--site=".Length);
             }
             else if (configArg.Length == 0)
             {
@@ -56,6 +61,30 @@ public static class Program
             Directory.CreateDirectory(dataDir);
 
             List<IApiSite> sites = BuildSites(config, dataDir);
+
+            // [段1b] --site=<站点键> 过滤——单站跑 check / fetch / stats 时免跑全站（站多时省事）；未命中即出声退出
+            if (siteFilter.Length > 0)
+            {
+                var filtered = new List<IApiSite>();
+                foreach (IApiSite candidate in sites)
+                {
+                    if (string.Equals(candidate.Id, siteFilter, StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(candidate.DisplayName, siteFilter, StringComparison.OrdinalIgnoreCase))
+                    {
+                        filtered.Add(candidate);
+                    }
+                }
+
+                if (filtered.Count == 0)
+                {
+                    Console.Error.WriteLine("未找到站点：" + siteFilter);
+                    Console.Error.WriteLine("可用：" + string.Join(" / ", sites.ConvertAll(s => s.Id)));
+                    return 2;
+                }
+
+                sites = filtered;
+            }
+
             string chromePath = ChromePath.Resolve(config.ChromePath);
 
             return command switch
@@ -64,6 +93,7 @@ public static class Program
                 "fetch" => await RunFetchAsync(sites, chromePath, dataDir, !fullScan, CancellationToken.None).ConfigureAwait(false),
                 "stats" => RunStats(sites, dataDir),
                 "sites" => RunSites(sites),
+                "probe" => await RunProbeAsync(sites, chromePath, dataDir, CancellationToken.None).ConfigureAwait(false),
                 "serve" => await ServeRunner.RunAsync(config, sites, chromePath, dataDir, CancellationToken.None).ConfigureAwait(false),
                 _ => UnknownCommand(command),
             };
@@ -115,14 +145,29 @@ public static class Program
                 ? item.ProfileDir
                 : Path.Combine(dataDir, "profiles", item.Id);
 
-            var site = new NewApiSite(item.Id, item.DisplayName, item.BaseUrl, profileDir, item.QuotaPerUnit, item.CurrencySymbol);
+            var site = BuildSite(item, profileDir);
 
             // [段2] 有 key 即走 API key 直连通道（特批——仅该站）；没有 key 仍走浏览器通道
-            site.ApiKey = keys.Get(item.Id);
+            if (site is NewApiSite direct)
+            {
+                direct.ApiKey = keys.Get(item.Id);
+            }
+
             sites.Add(site);
         }
 
         return sites;
+    }
+
+    /// <summary>按配置里的 type 造对应适配器（新增站点类型时在此登记）。</summary>
+    private static IApiSite BuildSite(SiteConfig item, string profileDir)
+    {
+        if (string.Equals(item.Type, "buddy", StringComparison.OrdinalIgnoreCase))
+        {
+            return new BuddySite(item.Id, item.DisplayName, item.BaseUrl, profileDir, item.QuotaPerUnit, item.CurrencySymbol);
+        }
+
+        return new NewApiSite(item.Id, item.DisplayName, item.BaseUrl, profileDir, item.QuotaPerUnit, item.CurrencySymbol);
     }
 
     /// <summary>探测各站登录态。</summary>
@@ -214,6 +259,165 @@ public static class Program
         return failed > 0 ? 1 : 0;
     }
 
+    /// <summary>
+    /// 侦察——新站点接入时取原始样本（登录探针 / 首页两档页大小 / 站点口径），落盘供校准适配器口径。
+    /// **强制可见窗口**：未登录时导航到登录页，登录由人完成（程序不代填账号密码）。
+    /// </summary>
+    private static async Task<int> RunProbeAsync(List<IApiSite> sites, string chromePath, string dataDir, CancellationToken ct)
+    {
+        List<IApiSite> targets = sites;
+
+        var hub = new BrowserHub(chromePath, Path.Combine(dataDir, "browsers.json"));
+        hub.Silent = ReadSilentSetting(dataDir);
+        var session = new SiteSession(hub);
+
+        string outDir = Path.Combine(dataDir, "probe");
+        Directory.CreateDirectory(outDir);
+
+        int failed = 0;
+        foreach (IApiSite site in targets)
+        {
+            Console.WriteLine("== " + site.DisplayName + "（" + site.Id + "） ==");
+            ProbeResult result = await session.ProbeAsync(site, 100, 200, true, ct).ConfigureAwait(false);
+            if (result.Error.Length > 0)
+            {
+                failed++;
+                Console.WriteLine("  侦察失败：" + result.Error);
+                continue;
+            }
+
+            string stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+            string path = Path.Combine(outDir, site.Id + "-" + stamp + ".txt");
+            string recordPath = Path.Combine(outDir, site.Id + "-" + stamp + "-record.json");
+            var text = new StringBuilder();
+            text.AppendLine("site=" + site.Id + " url=" + result.Url);
+            text.AppendLine("== login ==");
+            text.AppendLine(result.LoginRaw);
+            text.AppendLine("== usage(100) ==");
+            text.AppendLine(result.UsageRaw);
+            text.AppendLine("== usage(200) ==");
+            text.AppendLine(result.UsageWideRaw);
+            text.AppendLine("== snapshot ==");
+            text.AppendLine(result.SnapshotRaw);
+            text.AppendLine("== endpoints ==");
+            text.AppendLine(result.EndpointRaw);
+            File.WriteAllText(path, text.ToString(), Encoding.UTF8);
+
+            // [段2] 首页条数对照 + 首条记录单写——整页样本数百 KB，单条才便于逐字段校准
+            string shapes = DescribePages(site, result.UsageRaw, result.UsageWideRaw, recordPath);
+
+            Console.WriteLine("  页面：" + result.Url);
+            Console.WriteLine("  样本落盘：" + path);
+            Console.WriteLine("  首条记录：" + recordPath);
+            Console.WriteLine("  登录探针：" + Short(result.LoginRaw));
+            Console.WriteLine("  分页实况：" + shapes);
+            Console.WriteLine("  站点口径：" + Short(result.SnapshotRaw));
+            Console.WriteLine("  端点普查：");
+            foreach (string line in DescribeEndpoints(result.EndpointRaw))
+            {
+                Console.WriteLine("    " + line);
+            }
+        }
+
+        return failed > 0 ? 1 : 0;
+    }
+
+    /// <summary>把端点普查结果压成一行一端点（路径 / 状态 / 长度 / 开头片段）。</summary>
+    private static List<string> DescribeEndpoints(string raw)
+    {
+        var lines = new List<string>();
+        if (raw.Length == 0)
+        {
+            return lines;
+        }
+
+        try
+        {
+            using System.Text.Json.JsonDocument doc = System.Text.Json.JsonDocument.Parse(raw);
+            foreach (System.Text.Json.JsonElement item in doc.RootElement.EnumerateArray())
+            {
+                string path = item.TryGetProperty("path", out System.Text.Json.JsonElement p) ? p.GetString() ?? "" : "";
+                string status = item.TryGetProperty("status", out System.Text.Json.JsonElement s) ? s.ToString() : "?";
+                string length = item.TryGetProperty("length", out System.Text.Json.JsonElement l) ? l.ToString() : "0";
+                string head = item.TryGetProperty("head", out System.Text.Json.JsonElement h) ? (h.GetString() ?? "") : "";
+                string error = item.TryGetProperty("error", out System.Text.Json.JsonElement e) ? (e.GetString() ?? "") : "";
+                lines.Add(status + " · " + length + "B · " + path +
+                    " · " + (error.Length > 0 ? error : Short(head)));
+            }
+        }
+        catch (Exception ex)
+        {
+            lines.Add("普查结果不可解析：" + ex.Message);
+        }
+
+        return lines;
+    }
+
+    /// <summary>
+    /// 分页实况——两档页大小各返回多少条 + 服务端 total（**判站点是否认页大小**：认则两档条数不同）。
+    /// 顺带把**首条记录原文**单写一份小样本（整页样本动辄数百 KB，单条才便于逐字段校准）。
+    /// </summary>
+    private static string DescribePages(IApiSite site, string rawA, string rawB, string recordPath)
+    {
+        var parts = new List<string>();
+        parts.Add(Sample(site, "page_size=100", rawA, recordPath));
+        parts.Add(Sample(site, "page_size=200", rawB, ""));
+        return string.Join(" · ", parts);
+    }
+
+    /// <summary>解析一档页大小的响应——回「条数 / total」；给了样本路径则把首条原文写盘。</summary>
+    private static string Sample(IApiSite site, string label, string raw, string recordPath)
+    {
+        if (raw.Length == 0)
+        {
+            return label + "：无响应";
+        }
+
+        try
+        {
+            string body = ExtractBody(raw);
+            if (body.Length == 0)
+            {
+                return label + "：非 200（" + Short(raw) + "）";
+            }
+
+            UsagePage parsed = site.ParseUsagePage(body);
+            if (parsed.Records.Count > 0 && recordPath.Length > 0)
+            {
+                File.WriteAllText(recordPath, parsed.Records[0], Encoding.UTF8);
+            }
+
+            return label + "：条数 " + parsed.Records.Count + " / total " + (parsed.Total < 0 ? "无" : parsed.Total.ToString());
+        }
+        catch (Exception ex)
+        {
+            return label + "：解析失败（" + ex.Message + "）";
+        }
+    }
+
+    /// <summary>从 `{"status":...,"body":"..."}` 外壳里取出 body 文本（非 200 返回空串）。</summary>
+    private static string ExtractBody(string raw)
+    {
+        using System.Text.Json.JsonDocument doc = System.Text.Json.JsonDocument.Parse(raw);
+        if (!doc.RootElement.TryGetProperty("status", out System.Text.Json.JsonElement status) || status.ToString() != "200")
+        {
+            return "";
+        }
+
+        return doc.RootElement.TryGetProperty("body", out System.Text.Json.JsonElement body) ? (body.GetString() ?? "") : "";
+    }
+
+    /// <summary>截一段样本用于控制台预览（完整样本已落盘）。</summary>
+    private static string Short(string raw)
+    {
+        if (raw.Length <= 400)
+        {
+            return raw;
+        }
+
+        return raw.Substring(0, 400) + "…（共 " + raw.Length + " 字符）";
+    }
+
     /// <summary>打印库内计数。</summary>
     private static int RunStats(List<IApiSite> sites, string dataDir)
     {
@@ -255,7 +459,8 @@ public static class Program
     private static int UnknownCommand(string command)
     {
         Console.Error.WriteLine("未知子命令：" + command);
-        Console.Error.WriteLine("可用：check / fetch / serve / stats / sites");
+        Console.Error.WriteLine("可用：check / fetch / serve / stats / sites / probe");
+        Console.Error.WriteLine("选项：--full（fetch 全量重扫）· --site=<站点键>（只跑该站）");
         return 2;
     }
 }

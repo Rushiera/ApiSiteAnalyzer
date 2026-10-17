@@ -73,6 +73,15 @@ public sealed class NewApiSite : IApiSite
     /// <summary>API key 直连凭据——**特批**（2026-10-01 · Rushiera 单笔授权 · 仅此一次 · 仅限本站）。空 = 走浏览器通道（默认，凭据不出浏览器）；非空 = 走 API key 直连。理由：该网站没有用户名与密码设置、API key 不二次提供、全部功能仅认这一个唯一 id——没有「登录归人」的路径可走。key 落 data/keys.json（不入仓），由面板顶部明文编辑。</summary>
     public string ApiKey { get; set; } = "";
 
+    /// <summary>侦察候选端点——本站已知接口（新站接入时一次问清「有哪些数据可取」）。</summary>
+    public System.Collections.Generic.IReadOnlyList<string> ProbePaths => new[]
+    {
+        "/api/user/self",
+        "/api/log/self?p=1&page_size=5",
+        "/api/data/self?default_time=hour",
+        "/api/token/?p=1&size=5",
+    };
+
     /// <summary>
     /// 登录态探针——在页面上下文内取 access_token，再读账户信息（含**真实余额** quota）。
     /// **凭据不出浏览器**：token 由页面内的 fetch 使用，从不回传本进程。

@@ -19,6 +19,15 @@
       "profileDir": "",
       "quotaPerUnit": 5000000,
       "currencySymbol": "¤"
+    },
+    {
+      "id": "buddy",
+      "type": "buddy",
+      "displayName": "知序空间",
+      "baseUrl": "https://buddy.mewbius.com",
+      "profileDir": "",
+      "quotaPerUnit": 1000000,
+      "currencySymbol": "¥"
     }
   ]
 }

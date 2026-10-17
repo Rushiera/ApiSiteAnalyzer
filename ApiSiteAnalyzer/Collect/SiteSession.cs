@@ -39,6 +39,34 @@ public sealed class LoginState
 }
 
 /// <summary>
+/// 侦察结果——新站点接入时校准适配器口径用的原始样本（登录探针 / 首页 / 站点口径）。
+/// 全是**原始响应文本**：口径以真实样本为准，不靠前端源码推断。
+/// </summary>
+public sealed class ProbeResult
+{
+    /// <summary>执行侦察时所在的页面地址。</summary>
+    public string Url { get; set; } = "";
+
+    /// <summary>登录探针返回的原始 JSON。</summary>
+    public string LoginRaw { get; set; } = "";
+
+    /// <summary>用量首页（与采集同档页大小）的原始响应。</summary>
+    public string UsageRaw { get; set; } = "";
+
+    /// <summary>用量首页（对照页大小）的原始响应——探分页上界。</summary>
+    public string UsageWideRaw { get; set; } = "";
+
+    /// <summary>站点口径快照的原始响应。</summary>
+    public string SnapshotRaw { get; set; } = "";
+
+    /// <summary>端点普查结果（JSON 数组：路径 / 状态码 / 长度 / 开头片段）。</summary>
+    public string EndpointRaw { get; set; } = "";
+
+    /// <summary>失败原因（空 = 侦察完成）。</summary>
+    public string Error { get; set; } = "";
+}
+
+/// <summary>
 /// 站点会话——一次 CDP 会话内完成「登录态探测 + 分页拉取 + 口径快照」。
 /// **登录由人在真实浏览器里做**：本类发现未登录即返回引导，不代填账号密码、不读 cookie。
 /// **凭据不出浏览器**：access_token 只活在页面上下文里，由页面内的 fetch 使用，从不回传本进程。
@@ -255,6 +283,102 @@ public sealed class SiteSession
         }
     }
 
+    /// <summary>
+    /// 侦察——取原始响应样本（登录探针 / 首页两档页大小 / 站点口径），供**新站点接入时校准适配器口径**。
+    /// 只读：不改库、不落盘记录，样本由调用方写盘。**凭据不出浏览器**。
+    /// </summary>
+    /// <param name="site">站点适配器。</param>
+    /// <param name="pageSize">首页页大小（与采集同档）。</param>
+    /// <param name="widePageSize">对照页大小（探站点分页上界；0 = 不取）。</param>
+    /// <param name="forceWindow">是否强制可见窗口（登录取证时用——程序不代填账号密码，登录归人）。</param>
+    /// <param name="ct">取消令牌。</param>
+    /// <returns>侦察结果（各原始响应文本）。</returns>
+    public async Task<ProbeResult> ProbeAsync(IApiSite site, int pageSize, int widePageSize, bool forceWindow, CancellationToken ct)
+    {
+        var result = new ProbeResult();
+
+        // [段0] API key 直连站点（特批）——没有浏览器会话可侦察，出声拒绝
+        if (site is NewApiSite direct && direct.ApiKey.Length > 0)
+        {
+            result.Error = "该站点走 API key 直连通道，无浏览器会话可侦察";
+            return result;
+        }
+
+        CdpSession session;
+        try
+        {
+            session = await OpenSessionAsync(site, ct, forceWindow).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            result.Error = "浏览器不可用：" + ex.Message;
+            return result;
+        }
+
+        await using (session)
+        {
+            result.Url = await session.EvaluateAsync("String(location.href)", false, ct).ConfigureAwait(false);
+            result.LoginRaw = await session.EvaluateAsync(site.LoginProbeScript, true, ct).ConfigureAwait(false);
+
+            // [段1] 未登录且要人登录时——把通道标签页导航到登录页，省掉手工找入口
+            bool loggedIn = result.LoginRaw.IndexOf("\"loggedIn\":true", StringComparison.Ordinal) >= 0;
+            if (forceWindow && !loggedIn)
+            {
+                await session.NavigateAsync(site.LoginUrl, ct).ConfigureAwait(false);
+                await Task.Delay(NavigateSettleMs, ct).ConfigureAwait(false);
+                result.Url = await session.EvaluateAsync("String(location.href)", false, ct).ConfigureAwait(false);
+            }
+
+            result.UsageRaw = await session.EvaluateAsync(site.BuildUsagePageScript(1, pageSize, 0, 0), true, ct).ConfigureAwait(false);
+            if (widePageSize > 0 && widePageSize != pageSize)
+            {
+                result.UsageWideRaw = await session.EvaluateAsync(site.BuildUsagePageScript(1, widePageSize, 0, 0), true, ct).ConfigureAwait(false);
+            }
+
+            result.SnapshotRaw = await session.EvaluateAsync(site.BuildSnapshotScript(0, 0), true, ct).ConfigureAwait(false);
+
+            // [段2] 端点普查——把「这台站有哪些数据可取」一次问清（逐个端点取状态码 + 响应开头）
+            if (site.ProbePaths.Count > 0)
+            {
+                result.EndpointRaw = await session.EvaluateAsync(BuildEndpointSweepScript(site), true, ct).ConfigureAwait(false);
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// 端点普查脚本——逐个候选端点取数，回「路径 / 状态码 / 响应长度 / 开头 300 字符」。
+    /// 只读：不改站点任何状态（全 GET）。
+    /// </summary>
+    private static string BuildEndpointSweepScript(IApiSite site)
+    {
+        var items = new List<string>();
+        foreach (string path in site.ProbePaths)
+        {
+            items.Add("\"" + path.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"");
+        }
+
+        return "(async function(){" +
+            "var paths = [" + string.Join(",", items) + "];" +
+            "var out = [];" +
+            "for (var i = 0; i < paths.length; i++) {" +
+            "  var row = { path: paths[i], status: 0, length: 0, head: '', error: '' };" +
+            "  try {" +
+            "    var t = await window.__asaEnsureToken(false);" +
+            "    var headers = { 'Accept': 'application/json' };" +
+            "    if (t) { headers['Authorization'] = 'Bearer ' + t; }" +
+            "    var r = await fetch(paths[i], { credentials: 'include', signal: AbortSignal.timeout(15000), headers: headers });" +
+            "    var body = await r.text();" +
+            "    row.status = r.status; row.length = body.length; row.head = body.slice(0, 300);" +
+            "  } catch (e) { row.error = String(e); }" +
+            "  out.push(row);" +
+            "  await new Promise(function(res){ setTimeout(res, 120); });" +
+            "}" +
+            "return JSON.stringify(out);" +
+            "})()";
+    }
+
     /// <summary>在同一会话内取口径快照（失败返回 null）。</summary>
     private static async Task<SiteSnapshot?> TryFetchSnapshotAsync(CdpSession session, IApiSite site, long startTimestamp, long endTimestamp, CancellationToken ct)
     {
@@ -346,57 +470,72 @@ public sealed class SiteSession
     /// 打开受控会话——确保窗口存在、连通道标签页、按需注入钩子并导航。
     /// **页面已在站点域内就不重新导航**——window 上的 token 缓存与钩子得以延续，避免重复触发站点刷新频控。
     /// </summary>
-    private async Task<CdpSession> OpenSessionAsync(IApiSite site, CancellationToken ct)
+    private async Task<CdpSession> OpenSessionAsync(IApiSite site, CancellationToken ct, bool forceWindow = false)
     {
-        // [段1] 确保受控窗口（首次打开站点首页，用户可直接登录）
-        (BrowserInstance instance, bool launched) = await _hub.EnsureAsync(site.ProfileDir, site.BaseUrl, ct).ConfigureAwait(false);
-
-        // [段2] 连通道标签页——采集 / 探测都在它里面执行，不影响用户正在看的标签页
-        string socket = await _hub.EnsureChannelSocketAsync(instance, ct).ConfigureAwait(false);
-        CdpSession session = await CdpSession.ConnectAsync(socket, 20000, ct).ConfigureAwait(false);
+        // [段0] 强制可见窗口（登录取证用）——静默设置在这条路径上让位；用完恢复
+        bool savedSilent = _hub.Silent;
+        if (forceWindow)
+        {
+            _hub.Silent = false;
+        }
 
         try
         {
-            await session.EnablePageAsync(ct).ConfigureAwait(false);
+            // [段1] 确保受控窗口（首次打开站点首页，用户可直接登录）
+            (BrowserInstance instance, bool launched) = await _hub.EnsureAsync(site.ProfileDir, site.BaseUrl, ct).ConfigureAwait(false);
 
-            // [段3] 钩子——导航前注入（文档创建时执行）；注入状态登记在受控实例上（跨进程持久，避免重复注入）
-            string hook = site.BuildHookScript();
-            bool hookAdded = false;
-            if (hook.Length > 0 && !instance.HasHook(site.Id))
-            {
-                await session.AddInitScriptAsync(hook, ct).ConfigureAwait(false);
-                instance.MarkHook(site.Id);
-                _hub.Persist();
-                hookAdded = true;
-            }
+            // [段2] 连通道标签页——采集 / 探测都在它里面执行，不影响用户正在看的标签页
+            string socket = await _hub.EnsureChannelSocketAsync(instance, ct).ConfigureAwait(false);
+            CdpSession session = await CdpSession.ConnectAsync(socket, 20000, ct).ConfigureAwait(false);
 
-            // [段4] 页面已在站点域内且钩子已就位 → 不重新导航，保住 window 上的 token 缓存；
-            //       刚补注入钩子 → 必须重新加载，让钩子在文档创建时生效
-            string currentUrl = await session.EvaluateAsync("String(location.href)", false, ct).ConfigureAwait(false);
-            bool sameOrigin = currentUrl.StartsWith(site.BaseUrl, StringComparison.OrdinalIgnoreCase);
-            if (!sameOrigin || hookAdded)
+            try
             {
-                await session.NavigateAsync(site.BaseUrl, ct).ConfigureAwait(false);
-                await Task.Delay(NavigateSettleMs, ct).ConfigureAwait(false);
-            }
-            else if (launched)
-            {
-                await Task.Delay(NavigateSettleMs, ct).ConfigureAwait(false);
-            }
+                await session.EnablePageAsync(ct).ConfigureAwait(false);
 
-            // [段5] 会话准备（装 token 助手）——幂等，钩子可能已捕到 token
-            string prep = site.BuildSessionPrepScript();
-            if (prep.Length > 0)
-            {
-                await session.EvaluateAsync(prep, false, ct).ConfigureAwait(false);
-            }
+                // [段3] 钩子——导航前注入（文档创建时执行）；注入状态登记在受控实例上（跨进程持久，避免重复注入）
+                string hook = site.BuildHookScript();
+                bool hookAdded = false;
+                if (hook.Length > 0 && !instance.HasHook(site.Id))
+                {
+                    await session.AddInitScriptAsync(hook, ct).ConfigureAwait(false);
+                    instance.MarkHook(site.Id);
+                    _hub.Persist();
+                    hookAdded = true;
+                }
 
-            return session;
+                // [段4] 页面已在站点域内且钩子已就位 → 不重新导航，保住 window 上的 token 缓存；
+                //       刚补注入钩子 → 必须重新加载，让钩子在文档创建时生效
+                string currentUrl = await session.EvaluateAsync("String(location.href)", false, ct).ConfigureAwait(false);
+                bool sameOrigin = currentUrl.StartsWith(site.BaseUrl, StringComparison.OrdinalIgnoreCase);
+                if (!sameOrigin || hookAdded)
+                {
+                    await session.NavigateAsync(site.BaseUrl, ct).ConfigureAwait(false);
+                    await Task.Delay(NavigateSettleMs, ct).ConfigureAwait(false);
+                }
+                else if (launched)
+                {
+                    await Task.Delay(NavigateSettleMs, ct).ConfigureAwait(false);
+                }
+
+                // [段5] 会话准备（装 token 助手）——幂等，钩子可能已捕到 token
+                string prep = site.BuildSessionPrepScript();
+                if (prep.Length > 0)
+                {
+                    await session.EvaluateAsync(prep, false, ct).ConfigureAwait(false);
+                }
+
+                return session;
+            }
+            catch
+            {
+                await session.DisposeAsync().ConfigureAwait(false);
+                throw;
+            }
         }
-        catch
+        finally
         {
-            await session.DisposeAsync().ConfigureAwait(false);
-            throw;
+            // [段6] 恢复静默设置——侦察期的强制窗口不外溢到后续采集
+            _hub.Silent = savedSilent;
         }
     }
 

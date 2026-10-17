@@ -433,10 +433,10 @@
     <div class="scroll">
       <table id="recent">
         <thead><tr>
-          <th>时间</th><th class="colsite">站点</th><th>类型</th><th>模型</th><th>令牌</th>
-          <th class="num">额度</th><th class="num">金额</th>
+          <th>时间</th><th class="colsite">站点</th><th>模型</th><th>思考程度</th>
           <th class="num">输入</th><th class="num">输出</th><th class="num">缓存</th>
-          <th class="num">t/s</th><th class="num">首字延迟(ms)</th><th class="num">耗时(ms)</th><th>请求 ID</th>
+          <th class="num">t/s</th><th class="num">首字延迟(ms)</th><th class="num">耗时(ms)</th>
+          <th class="num">金额</th><th class="num">额度</th><th>会话</th><th>请求 ID</th>
         </tr></thead>
         <tbody></tbody>
       </table>
@@ -912,19 +912,20 @@ function renderRecent(rows, sym){
   if(!rows || !rows.length){ tb.innerHTML = '<tr><td colspan="14" class="muted">暂无数据</td></tr>'; return; }
   tb.innerHTML = rows.map(r =>
     '<tr>' +
-    '<td>'+esc(fmtTime(r.createdAt))+'</td>' +
+    /* 类型列已撤——异常记录（非消费）就在时间格里挂个小标签，失败仍然看得见 */
+    '<td>'+esc(fmtTime(r.createdAt))+(r.type !== 2 ? ' <span class="tag">'+esc(TYPE_NAME[r.type] || r.type)+'</span>' : '')+'</td>' +
     '<td class="colsite">'+esc(r.siteName || '—')+'</td>' +
-    '<td><span class="tag">'+esc(TYPE_NAME[r.type] || r.type)+'</span></td>' +
     '<td title="'+esc(r.upstreamModel)+'">'+esc(r.modelName || '—')+'</td>' +
-    '<td>'+esc(r.tokenName || '—')+'</td>' +
-    '<td class="num">'+fmtNum(r.quota)+'</td>' +
-    '<td class="num">'+fmtAmount(r.amount, sym)+'</td>' +
+    '<td>'+(r.reasoningEffort ? esc(r.reasoningEffort) : '—')+'</td>' +
     '<td class="num">'+fmtNum(r.promptTokens)+cacheLine(r)+'</td>' +
     '<td class="num">'+fmtNum(r.completionTokens)+'</td>' +
     '<td class="num">'+fmtNum(r.cacheTokens)+'</td>' +
     '<td class="num">'+(r.speedTps > 0 ? r.speedTps.toFixed(0) : '—')+'</td>' +
     '<td class="num">'+(r.firstTokenMs > 0 ? r.firstTokenMs : '—')+'</td>' +
     '<td class="num">'+fmtMs(r.useTime)+'</td>' +
+    '<td class="num">'+fmtAmount(r.amount, sym)+'</td>' +
+    '<td class="num">'+fmtNum(r.quota)+'</td>' +
+    '<td><span class="reqid" title="'+esc(r.sessionId)+'">'+esc(r.sessionId || '—')+'</span></td>' +
     '<td><span class="reqid" title="'+esc(r.requestId)+'">'+esc(r.requestId || '—')+'</span></td>' +
     '</tr>').join('');
 }
@@ -1240,8 +1241,10 @@ function idMeta(r){
   const parts = [];
   parts.push('模型 <b>' + esc(r.modelName || '—') + '</b>');
   if(r.upstreamModel) parts.push('上游 ' + esc(r.upstreamModel));
+  if(r.reasoningEffort) parts.push('思考档位 ' + esc(r.reasoningEffort));
   parts.push('令牌 ' + esc(r.tokenName || '—'));
   parts.push('分组 ' + esc(r.groupName || '—'));
+  if(r.sessionId) parts.push('会话 ' + esc(r.sessionId));
   parts.push('额度 ' + fmtNum(r.quota));
   parts.push('金额 ' + fmtAmount(r.amount, curSym));
   parts.push('输入 ' + fmtNum(r.promptTokens) + '（命中缓存 ' + fmtNum(r.cacheTokens) + '）');

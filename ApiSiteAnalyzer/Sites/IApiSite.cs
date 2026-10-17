@@ -29,6 +29,12 @@ public interface IApiSite
     /// <summary>货币符号（展示用）。</summary>
     string CurrencySymbol { get; }
 
+    /// <summary>
+    /// 侦察用的候选端点（相对站点根；空 = 不扫）。
+    /// 用途：新站点接入时把「这台站到底有哪些数据可取」一次问清——逐个端点取状态码与响应开头。
+    /// </summary>
+    System.Collections.Generic.IReadOnlyList<string> ProbePaths { get; }
+
     /// <summary>登录态探针——在页面上下文里执行的 JS 源码，返回 JSON 字符串。</summary>
     string LoginProbeScript { get; }
 

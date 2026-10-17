@@ -4,6 +4,7 @@ API 站用量分析器（**C# / .NET 8**）。把 API 站的用量日志**全量
 
 首站：贤鱼 API（`https://api.xyjun.fun`，New API v1.0.0-rc.40）。
 第二站：`http://47.250.160.225:8443`（New API · **API key 直连 · 特批**——见下文「API key 直连」）。
+第三站：`https://buddy.mewbius.com`（**知序空间**，非 New API 系 · 自研面板 JWT）——见下文「知序空间适配器」。
 
 > 架构与选型 → `CCBP:Project/ApiSiteAnalyzer/design-ApiSiteAnalyzer.md` §〇。
 
@@ -14,7 +15,7 @@ ApiSiteAnalyzer/                主项目
   Config/                       配置加载（严格模式——未知键 / 类型错报错退出）
   Browser/                      CDP 通道（chrome 启动器 / 会话 / 受控实例中心）
   Collect/                      站点会话（登录探测 + 分页拉取 + 口径快照）+ 逐页落库器
-  Sites/                        站点适配器（IApiSite + NewApiSite）
+  Sites/                        站点适配器（IApiSite + NewApiSite + BuddySite）
   Store/                        SQLite 库（幂等写入 + 增量比对 + 聚合查询）
   Web/                          Minimal API 端点 + 自动采集器 + 工作状态监视器 + 跨站聚合器（SiteAggregate）+ wwwroot/index.html
 config.json                     站点清单 + 端口 + chrome 路径
@@ -35,7 +36,10 @@ ApiSiteAnalyzer_A.exe fetch --full     # 全量重扫到底（不提前停止）
 ApiSiteAnalyzer_A.exe serve            # 起面板（默认，双击 exe 等同）
 ApiSiteAnalyzer_A.exe stats            # 库内计数
 ApiSiteAnalyzer_A.exe sites            # 站点清单
+ApiSiteAnalyzer_A.exe probe            # 侦察（新站点接入用）：原始样本 + 分页实况 + 端点普查，落 data/probe/
 ```
+
+选项：`--site=<站点键>` 只跑该站（check / fetch / stats / probe 通用）；`--full` 见上。
 
 开发态用 `dotnet run --project ApiSiteAnalyzer -- <子命令>`。
 
@@ -215,11 +219,13 @@ CLI 同样走这条通道：`ApiSiteAnalyzer_A.exe fetch` 会为每个站点选�
 - **真实余额**显示到**小数点后 8 位**（其余金额列仍 4 位——余额是「还剩多少」的判断依据，精度优先；明细金额 4 位足够）
 - **耗时列**按**毫秒**显示（站点 `use_time` 字段原始单位是**秒**，故面板值恒为 1000 的整数倍——精度上限由数据源决定，不因显示单位提高）
 - 最近记录的**「请求 ID」列**替代原「流式」列——站点 `request_id` 较长，超宽省略号收口、悬停看全文（该字段即库内稳定主键的来源）
+- **最近记录列（v0.20.2 由 Rushiera 定序 · 共 13/14 列）**：时间 → 站点（仅总览）→ 模型 → 思考程度 → 输入 → 输出 → 缓存 → t/s → 首字延迟(ms) → 耗时(ms) → 金额 → 额度 → **会话** → 请求 ID。**「类型」与「令牌」两列已撤**——类型改为**非消费记录在时间格挂小标签**（失败仍然看得见），令牌归「已探明请求 ID」弹窗（那里给完整字段）。「思考程度」= 站点 `reasoning_effort`（该站部分请求由客户端不指定，空值显示 `—`）；「会话」= 站点 `session_id`（同样可空——没上报就 `—`）
+- **库内新增两列**（v0.20.1）：`reasoning_effort`（思考档位）与 `session_id`（**站点自报的会话标识**，如 `cat-home4-majordomo`）——后者可作线程分析的硬线索（比按 token 串链更直接）；加列走**向后兼容演进**，不动库结构版本（版本号一涨，还在跑的旧槽会把整库备份重建）
 - **「输入」列与「输入 Token」卡片下方同一行小黄字 `A（命中缓存 B）`**——`B` = 缓存 token，`A` = 输入 − 缓存（未命中部分）。前提：本站 `prompt_tokens` **含**缓存（实测见下）
 - 卡片里的**平均首字延迟 / 平均耗时 / 平均速率**是**近十次请求**的窗口均值（非全库均值）——样本不足十条时标题写「近 N 次」；原「时间跨度」「本地额度」两张卡片已撤，后者换成**已探明请求 ID**（库内去重计数）
 - 三个均值卡片下方各多一行**对比小字**：与**再往前十次（第 11–20 次）**比——右侧百分比带符号，**首字延迟 / 耗时越小越好、速率越大越好**，好绿（`--ok`）差红（`--bad`）持平灰；前窗不足 11 条写「样本不足」、均值不可比写「无有效样本」（如实说明，不静默省略、不假报百分比）
 - **「近十次平均速率」右侧再挂四项**（2026-10-02 起）：**近 24 小时输入 Token / 输出 Token / 缓存命中率 / 已探明请求 ID**——窗口按记录时刻切 `[now−24h, now)` 与 `[now−48h, now−24h)`（半开区间、相邻不重叠，边界取同一个 `now`）；每项下方对比行给**前 24 小时的具体数值 + 正负百分比**，**四项统一上色**（2026-10-02 显示口径轮起：涨绿跌红——用量涨 = 活跃，与命中率「越大越好」同一口径；原「token 量级与请求数中性、不着色」作废）；前窗无记录写「前 24 小时 无记录」、前窗有记录但分母为 0 写「无有效样本」（如实说明，不假报百分比）
-- **「已探明请求 ID」卡片可点开**——弹窗**逐条给该条记录的完整字段**（模型 / 上游 / 令牌 / 分组 / 额度 / 金额 / 三种 token / t/s / 首字延迟 / 耗时 / 流式；记录正文非空时另起一行），按时刻倒序 · **每页 50** · 「加载更多」续取；口径与卡片数字同一套（库内 `request_id` 非空去重，随顶部「仅消费 / 全部记录」过滤）
+- **「已探明请求 ID」卡片可点开**——弹窗**逐条给该条记录的完整字段**（模型 / 上游 / **思考档位** / 令牌 / 分组 / **会话** / 额度 / 金额 / 三种 token / t/s / 首字延迟 / 耗时 / 流式；记录正文非空时另起一行），按时刻倒序 · **每页 50** · 「加载更多」续取；口径与卡片数字同一套（库内 `request_id` 非空去重，随顶部「仅消费 / 全部记录」过滤）
 - **线程分析**（2026-10-02 起 · 在「已探明请求 ID」弹窗里点「线程分析」按钮；**2026-10-05 v0.18.0 改版**）：把**最近 200 条**记录按「上一轮 `输入 + 输出` == 下一轮 `输入`」串成**线程链**——同一条链 = 同一次会话的连续轮次。弹窗内与请求 ID 列表**互斥切换**（「返回列表」回来）。
   - **后继判据三条**（2026-10-05 起——旧版只有相对 5%，全量实测下**每轮平均有 4 个以上候选**、并发轮占 85%，红标失去信息量）：① **相对 ≤ 5%**（小量级灵敏）；② **绝对差 ≤ 1000**（几十万 token 上 5% 是一条上万 token 的带，只靠相对容差会把不相干的记录连成链）；③ **方向**——下一轮输入不低于期望值 200 token（上下文只增不减；负得多的候选不是同一会话的续轮）
   - **并发两条判据**：① **出度**——某一轮的容差内后继**多于一个**（标红：此处确实有多个去向）；② **同时在场**——两条链**时间交错**（时刻区间互相插入对方内部）**且**有轮对的输入在容差内重合（70 / 71 型）**且**两轮**时刻接近**（间隔 ≤ 两者耗时的较大者——同一次并发里两轮本该同时在场）
@@ -331,6 +337,74 @@ CLI 同样走这条通道：`ApiSiteAnalyzer_A.exe fetch` 会为每个站点选�
     实测 headless 实例上 `check` 拿到「已登录 · 用户 Rushiera · 请求数 3831」，三态切换后登录态都在。
     故静默采集不需要第二条取数通道——**同一条 CDP 通道换启动参数**即可。
     判据：`data/browsers.json` 的 `headless` 字段 + 采集期间不出现新窗口。
+30. **知序空间不是 New API 系**（2026-10-17 侦察）——`/usage-logs/common` 那套在这里不存在：站点是 Vue3 自研面板，
+    接口基址 `/api/v1`，响应包装 `{code,message,data}`（`code=0` 成功），分页参 `page` / `page_size`，
+    用法页 `/usage`（前端路由）与接口 `/api/v1/usage` 同域不同物。故它需要**独立适配器**（`BuddySite`），
+    不能靠 `type: "newapi"` 蒙混——`ConfigLoader` 的 `type` 白名单是硬闸。
+31. **该站认证是 localStorage JWT，不是 cookie**（2026-10-17）——四键 `auth_token` / `refresh_token` /
+    `token_expires_at` / `auth_user` 都在 `localStorage`；`Authorization: Bearer <access_token>`。
+    **没有 HttpOnly cookie 可供旁听**，故 `BuildHookScript()` 返回空串（不注入钩子）；
+    页面内 `fetch` 直接读 `localStorage` 取 token——**token 仍在页面上下文里使用，不出浏览器**，红线不破。
+    刷新：`POST /api/v1/auth/refresh`，body `{"refresh_token":"..."}` → `data.access_token` / `refresh_token` / `expires_in`。
+32. **该站有真正的 `request_id`**（2026-10-17 实测）——`"client:<uuid>"` 形态，逐条唯一且稳定（不是展示序号），
+    直接当库内主键 `log_key`；退路依次为记录 `id`、时刻+模型+用量的组合键（与 New API 站同一套回退口径）。
+33. **该站金额是终值，不需要换算**（2026-10-17）——记录里 `actual_cost` 已是**元**（含分组倍率、长上下文计费），
+    不是 New API 那种 quota 计数。适配器把它按 `QuotaPerUnit`（本站配 **1000000**，即 1 元 = 1e6 quota，
+    精度到 1e-6 元）折成整数落库，金额仍由 `quota / quotaPerUnit` 派生——**面板 / 卡片 / 总览零改动**。
+34. **该站 token 口径与本工具一致但对齐方式不同**（2026-10-17）——记录分别给 `input_tokens`（**不含缓存**）、
+    `cache_read_tokens`、`cache_creation_tokens`、`output_tokens`；本工具的 `prompt_tokens` 约定为**含缓存的输入总量**，
+    故适配器落库时 `prompt = input + cache_read + cache_creation`、`cache = cache_read`——
+    于是缓存命中率 = `cache / prompt`，与站点前端同法（其分子分母即 `cache_read / (input + cache_read + cache_creation)`）。
+    站点口径 `total_tokens` = 输入 + 输出 + 缓存，与本地「prompt + completion」同源，可直接对照。
+35. **该站耗时给毫秒，库内列是秒**（2026-10-17）——`duration_ms` / `first_token_ms`。库内 `use_time` 列是秒，
+    适配器按四舍五入折算（`duration_ms / 1000`）；毫秒精度由 `first_token_ms` 原样保留。
+    速率仍是 `completion / use_time`——**与本工具既有口径同源、可逐条复算**（不另立新公式）。
+36. **该站 `total` 与「认不认页大小」都实测过**（2026-10-17）——`page_size=100` 回 100 条、`page_size=200` 回 200 条、
+    `data.total` 恒为该账户全量条数 → 站点**认页大小**，分页与追平逻辑与 New API 站同一套（连续 20 条一致即停）。
+    实测增量：首拉 4 页 / 305 条全新增；二次拉 1 页 / 100 条 · 新增 2 · 一致 98 · 追平即停。
+37. **该站的错误请求视图默认关着**（2026-10-17）——`GET /api/v1/usage/errors` 回 `403 Error requests view is disabled`，
+    站点前端也把它当空处理。适配器不依赖该端点（不采集失败请求明细），403 不当作故障。
+38. **`probe` 是新站点接入的侦察口**（2026-10-17）——一条命令取三样：**原始样本**（登录探针 / 两档页大小 /
+    站点口径，落 `data/probe/<站点>-<时间戳>.txt` + 首条记录单写 `-record.json`）、**分页实况**（两档条数 + `total`）、
+    **端点普查**（候选端点逐个 GET，回状态码 / 长度 / 响应开头——`IApiSite.ProbePaths` 声明候选）。
+    「有哪些数据可取」由真实响应回答，不靠读前端源码推断。**只读**：全 GET，不改站点状态。
+
+## 知序空间（`buddy.mewbius.com`）适配器
+
+非 New API 系的自研中转站（站名「知序空间」）。接入方式与首站完全一致——**浏览器通道 + 页面内取数 + 凭据不出浏览器**。
+
+| 项 | 实况（2026-10-17 侦察 · 登录态实测） |
+|:--|:--|
+| 站点键 / 类型 | `buddy` / `type: "buddy"`（`config.json`） |
+| 登录入口 | `/login`（邮箱 + 密码；首页 `/activate` 是兑换码页，不是登录入口） |
+| 凭据载体 | `localStorage` 四键（**浏览器用户目录**仍是唯一持久载体，程序不存账号密码） |
+| 用量接口 | `GET /api/v1/usage?page=N&page_size=M`（可选 `start_date` / `end_date`，`yyyy-MM-dd`）→ `data.items` + `data.total` |
+| 账户接口 | `GET /api/v1/user/profile` → `username` / `balance`（真实余额，元） |
+| 口径接口 | `GET /api/v1/usage/stats` → `total_requests` / `total_tokens` / `total_actual_cost`（站点口径快照） |
+| 记录字段 | `id` / `request_id` / `created_at`（ISO8601 带时区）/ `model` / `reasoning_effort` / `input_tokens` / `output_tokens` / `cache_read_tokens` / `cache_creation_tokens` / `actual_cost` / `duration_ms` / `first_token_ms` / `request_type` / `api_key.name` / `group.name` |
+| 金额换算比 | `quotaPerUnit: 1000000`（1 元 = 1e6 quota——`actual_cost` 是终值，折成整数只为落库；金额仍由 `quota / quotaPerUnit` 派生） |
+| 取不到的 | 失败请求明细（`/api/v1/usage/errors` 403 关着）；无 API key 直连通道（`sk-` 只服务补全接口，调面板接口回 `INVALID_TOKEN`） |
+
+### 该站还能取到但本工具暂不采集的（侦察记录）
+
+`probe` 的端点普查实测（登录态，2026-10-17）——留档备后续扩面，**当前不进库**：
+
+| 端点 | 状态 | 内容 |
+|:--|:--|:--|
+| `/api/v1/keys` | 200 | API key 列表（名称 / 状态 / 用量窗口） |
+| `/api/v1/groups/available` | 200 | 可用分组（订阅类型 / 日周月限额 / 倍率 / 峰谷） |
+| `/api/v1/subscriptions` | 200 | 订阅（起止 / 状态 / 日周月窗口用量） |
+| `/api/v1/usage/dashboard/stats` | 200 | dashboard 汇总（含 API key 计数） |
+| `/api/v1/usage/dashboard/trend` | 200 | 按天趋势（服务端聚合） |
+| `/api/v1/usage/dashboard/models` | 200 | 按模型聚合（服务端聚合） |
+| `/api/v1/redeem/history` | 200 | 兑换码使用历史 |
+| `/api/v1/user/aff` | 200 | 邀请码 / 返佣 |
+| `/api/v1/settings/public` | 200 | 站点公开设置（注册 / 支付 / 文档入口） |
+| `/api/v1/usage/errors` | **403** | 错误请求明细——**站点该视图默认关闭** |
+
+> 站点口径与本地汇总的对照（2026-10-17）：站点 `/usage/stats` 与本地库**同步增长**（首拉时 305 / 305，
+> 二次 307 / 307，条数一致）；金额上站点给 `total_actual_cost`（终值元），本地由 `quota / quotaPerUnit` 派生——
+> 两套值都在面板上分开展示、互不覆盖（与首站同一规矩）。
 
 ## t/s 口径复算（本地自算列）
 

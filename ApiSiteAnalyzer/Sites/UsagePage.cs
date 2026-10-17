@@ -74,6 +74,12 @@ public sealed class UsageRow
 
     /// <summary>记录正文（错误 / 管理类记录用）。</summary>
     public string Content { get; set; } = "";
+
+    /// <summary>思考档位（站点原值，如 <c>high</c> / <c>medium</c>；空 = 站点没给或客户端没指定）。</summary>
+    public string ReasoningEffort { get; set; } = "";
+
+    /// <summary>会话标识（站点原值，如 <c>cat-home4-639259389468574799</c>；空 = 站点没给）。</summary>
+    public string SessionId { get; set; } = "";
 }
 
 /// <summary>
