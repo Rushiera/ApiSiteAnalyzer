@@ -142,6 +142,14 @@ public sealed class BrowserHub
     /// </summary>
     public bool Silent { get; set; } = true;
 
+    /// <summary>
+    /// 登录窗口保活——true（默认）：已开着可见窗口时，采集**沿用那个窗口**，不为了「静默」把它停掉换 headless。
+    /// 站点会话活在页面里（贤鱼的 access_token 只在页面内存、靠站点自己的 SPA 续期，刷新接口还有频控），
+    /// 反复停旧起新会把会话打回「要重新换取」的状态——保活比静默更值钱。
+    /// false = 旧行为（采集前按 `Silent` 停旧起新切换模式）。
+    /// </summary>
+    public bool KeepWindow { get; set; } = true;
+
     /// <summary>取该用户目录的存活受控实例（不启动）。</summary>
     /// <param name="profileDir">浏览器用户数据目录。</param>
     /// <returns>存活实例；无则 null。</returns>
@@ -185,6 +193,7 @@ public sealed class BrowserHub
     /// <summary>
     /// 按指定模式确保受控实例。**模式不符先停旧实例**——同一用户目录同时只能有一个 chrome
     /// （起第二个会被单例转发吃掉、静默退出），故静默与窗口之间的切换必须「停旧起新」。
+    /// 例外：`KeepWindow` 开着时，已存在的**可见窗口**对 headless 请求直接沿用（判据见 `IsModeAcceptable`）。
     /// </summary>
     /// <param name="profileDir">浏览器用户数据目录。</param>
     /// <param name="url">启动时打开的地址。</param>
@@ -194,7 +203,7 @@ public sealed class BrowserHub
     private async Task<(BrowserInstance Instance, bool Launched)> EnsureCoreAsync(string profileDir, string url, bool headless, CancellationToken ct)
     {
         BrowserInstance? alive = await FindAliveAsync(profileDir).ConfigureAwait(false);
-        if (alive is not null && alive.Headless == headless)
+        if (alive is not null && IsModeAcceptable(alive, headless))
         {
             return (alive, false);
         }
@@ -203,12 +212,13 @@ public sealed class BrowserHub
         try
         {
             alive = await FindAliveAsync(profileDir).ConfigureAwait(false);
-            if (alive is not null && alive.Headless == headless)
+            if (alive is not null && IsModeAcceptable(alive, headless))
             {
                 return (alive, false);
             }
 
-            // [段0] 模式不符（静默 ↔ 窗口切换）——先停旧实例，否则新实例会被单例转发吃掉
+            // [段0] 模式不符（静默 ↔ 窗口切换）——先停旧实例，否则新实例会被单例转发吃掉。
+            //        窗口保活开着时，可见窗口对 headless 请求是可接受的（IsModeAcceptable 已放行），走到这里必是真要换模式
             if (alive is not null)
             {
                 await StopInstanceAsync(alive, ct).ConfigureAwait(false);
@@ -220,7 +230,7 @@ public sealed class BrowserHub
             BrowserInstance? adopted = await TryAdoptAsync(profileDir).ConfigureAwait(false);
             if (adopted is not null)
             {
-                if (adopted.Headless == headless)
+                if (IsModeAcceptable(adopted, headless))
                 {
                     return (adopted, false);
                 }
@@ -272,7 +282,25 @@ public sealed class BrowserHub
         }
     }
     /// <summary>
-    /// 停掉一个受控实例——结束进程树、摘出登记表，并等进程真正退出。
+    /// 现有实例能否满足本次请求的模式——**不做无谓的模式切换**：
+    /// 要可见窗口而现有是 headless → 必须换（登录归人，人得看得见）；
+    /// 要静默而现有是可见窗口 → `KeepWindow` 开着就**沿用**（会话活在窗口里，停掉即掉会话），
+    /// 关掉才按旧行为换 headless。
+    /// </summary>
+    /// <param name="instance">现有受控实例。</param>
+    /// <param name="wantHeadless">本次是否需要 headless。</param>
+    /// <returns>可沿用返回 true。</returns>
+    private bool IsModeAcceptable(BrowserInstance instance, bool wantHeadless)
+    {
+        if (instance.Headless == wantHeadless)
+        {
+            return true;
+        }
+
+        return wantHeadless && !instance.Headless && KeepWindow;
+    }
+    /// <summary>
+    /// 停掉一个受控实例——先请浏览器自己关（`Browser.close`：刷盘用户目录后正常退出），没退再结束进程树。
     /// **必须等退出**：模式切换后要立刻起新实例，旧进程还占着用户目录时新进程会被单例转发吃掉。
     /// 只处理受控实例——该用户目录是程序专用目录，占用者必是本程序启动的实例；
     /// 用户自己开的 chrome 用了同一目录时，`EnsureCoreAsync` 在启动前就已出声拒绝，走不到这里。
@@ -292,6 +320,41 @@ public sealed class BrowserHub
         {
             // [段1] 接管来的实例可能没有 pid（登记表落后）——按用户目录反查占用进程
             pids.AddRange(await FindOccupantsAsync(instance.ProfileDir, ct).ConfigureAwait(false));
+        }
+
+        // [段2] 先请浏览器自己关——`Browser.close` 会刷盘 cookie / 用户目录后正常退出；
+        //        站点登录态就存在该目录里，硬杀留脏标记是掉登录的常见诱因。
+        //        给 8 秒自行退出，没退再按进程树结束（走到兜底要出声，不静默降级）
+        if (pids.Count > 0 && instance.Port > 0)
+        {
+            bool asked = await CdpSession.CloseBrowserAsync(instance.Port, 5000, ct).ConfigureAwait(false);
+            if (asked)
+            {
+                using var grace = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                grace.CancelAfter(8000);
+                bool exited = false;
+
+                try
+                {
+                    using Process probe = Process.GetProcessById(pids[0]);
+                    await probe.WaitForExitAsync(grace.Token).ConfigureAwait(false);
+                    exited = true;
+                }
+                catch (ArgumentException)
+                {
+                    // 已自行退出——正是想要的
+                    exited = true;
+                }
+                catch (OperationCanceledException)
+                {
+                    Console.Error.WriteLine("浏览器未在宽限期内自行退出，回落到结束进程树（用户目录 " + instance.ProfileDir + "）");
+                }
+
+                if (exited)
+                {
+                    return;
+                }
+            }
         }
 
         foreach (int pid in pids)

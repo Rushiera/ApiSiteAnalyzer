@@ -30,6 +30,34 @@ public interface IApiSite
     string CurrencySymbol { get; }
 
     /// <summary>
+    /// 余额位的名称——面板顶部余额段与总览站点表里这一栏叫什么。
+    /// 默认「真实余额」；没有余额概念、只能拿别的量表达额度消耗的站点自报名称（如知序空间「已用积分」）。
+    /// </summary>
+    string BalanceLabel
+    {
+        get { return "真实余额"; }
+    }
+
+    /// <summary>
+    /// 余额位的单位——空 = 货币（按 `QuotaPerUnit` 折算后配 `CurrencySymbol` 显示）；
+    /// 非空 = 该站自报的计量单位（如「积分」），显示为「数值 + 单位」，不折成货币。
+    /// </summary>
+    string BalanceUnit
+    {
+        get { return ""; }
+    }
+
+    /// <summary>
+    /// 余额位的显示除数——把库内记下的余额位数值除成展示值。
+    /// 货币站恒为 1（展示走 `QuotaPerUnit` 折算）；自报单位的站点按自己的换算给除数
+    /// （如知序空间：数值记「千分之一元」，÷4 得积分）。
+    /// </summary>
+    double BalanceScale
+    {
+        get { return 1; }
+    }
+
+    /// <summary>
     /// 侦察用的候选端点（相对站点根；空 = 不扫）。
     /// 用途：新站点接入时把「这台站到底有哪些数据可取」一次问清——逐个端点取状态码与响应开头。
     /// </summary>

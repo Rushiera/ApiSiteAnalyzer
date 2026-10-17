@@ -164,7 +164,7 @@
   .dialog .actions{display:flex;gap:8px;align-items:center;margin-top:18px}
   .dialog .actions .spacer{flex:1}
 
-  /* 站点表（总览视图）——一站一行：站点 / 通道 / 真实余额 / 登录态 / 下次采集 / 本地汇总 / 上次拉取 / 自动采集
+  /* 站点表（总览视图）——一站一行：站点 / 通道 / 余额（按站口径）/ 登录态 / 下次采集 / 本地汇总 / 上次拉取 / 自动采集
      宽度受控：长文本换行、列宽按内容收缩——任何窗口宽度下都不出现左右滑动的滚动条 */
   .siteblocks{display:none;margin:14px 0}
   body.all-mode .siteblocks{display:block}
@@ -315,7 +315,11 @@
       </div>
       <div class="row">
         <input type="checkbox" id="optSilent" checked />
-        <label for="optSilent">静默采集（浏览器在后台运行，不弹窗口；点「去登录」时才临时切出窗口，登录完自动切回）</label>
+        <label for="optSilent">静默采集（浏览器在后台运行，不弹窗口；点「去登录」时才临时切出窗口）</label>
+      </div>
+      <div class="row">
+        <input type="checkbox" id="optKeepWindow" checked />
+        <label for="optKeepWindow">登录窗口保活（登录后窗口留着，采集直接复用它——停掉实例会把页面里的会话打断，容易掉登录）</label>
       </div>
       <div class="actions">
         <button id="btnFull">全量拉取一次</button>
@@ -367,7 +371,7 @@
 
   <div class="balance">
     <div>
-      <div class="label">真实余额（站点 /api/user/self）</div>
+      <div class="label" id="balanceLabel">真实余额（站点 /api/user/self）</div>
       <div class="main" id="balanceMain">—</div>
     </div>
     <div class="side" id="balanceSide"></div>
@@ -382,7 +386,7 @@
   <div class="siteblocks" id="siteBlocks">
     <table id="siteTable">
       <thead><tr>
-        <th>站点</th><th>通道</th><th>真实余额</th><th>登录态</th>
+        <th>站点</th><th>通道</th><th>余额（按站口径）</th><th>登录态</th>
         <th class="num">下次采集</th><th class="num">本地记录</th><th class="num">本地消费</th>
         <th class="num">库内行数</th><th>上次拉取</th><th>自动采集</th>
       </tr></thead>
@@ -620,6 +624,9 @@ async function saveKey(){
 function renderBalance(balance){
   const s = siteMap[currentSite];
   if(!s){ $('balanceMain').textContent = '—'; return; }
+  /* 余额位名称随站点走——默认「真实余额」；自报口径的站点用它自己的名字（如知序空间「已用积分」） */
+  const label = s.balanceLabel || '真实余额';
+  $('balanceLabel').textContent = label + (s.balanceUnit ? '（站点口径）' : '（站点 /api/user/self）');
   /* 总览没有单站余额——逐站余额在站点块里 */
   if(isAll()){
     $('balanceMain').textContent = '—';
@@ -639,7 +646,15 @@ function renderBalance(balance){
   }
   if(!balance && balance !== 0){
     $('balanceMain').textContent = '—';
-    $('balanceSide').textContent = '点「检查登录」取真实余额';
+    $('balanceSide').textContent = '点「检查登录」取' + esc(label);
+    return;
+  }
+  /* 自报单位（如「积分」）——按站点给的除数换成展示值，不折货币；货币站走原口径（quota / 换算比，8 位小数） */
+  if(s.balanceUnit){
+    const scale = Number(s.balanceScale) > 0 ? Number(s.balanceScale) : 1;
+    const value = Number(balance) / scale;
+    $('balanceMain').textContent = value.toLocaleString('zh-CN', {maximumFractionDigits: 2}) + ' ' + s.balanceUnit;
+    $('balanceSide').innerHTML = '站点口径 · 原始 <b>' + fmtNum(balance) + '</b> · 换算 <b>1 ' + esc(s.balanceUnit) + ' = ' + fmtNum(scale) + '</b>';
     return;
   }
   const sym = s.currencySymbol;
@@ -966,17 +981,25 @@ function renderSiteBlocks(sites){
   }
   el.innerHTML = sites.map(s => {
     const direct = s.channel === 'apikey';
-    /* 余额格：主值 + 副行小字——直连站无余额接口按「不设限」展示，浏览器站没探过就如实说未探测 */
+    /* 余额格：主值 + 副行小字——直连站无余额接口按「不设限」展示，浏览器站没探过就如实说未探测；
+       自报单位的站点（如知序空间「已用积分」）按它自己的名称与单位显示 */
     let bal, sub;
+    const balLabel = s.balanceLabel || '真实余额';
     if(s.unlimitedBalance){
       bal = '<span class="bal">不设限</span>';
       sub = '该站无余额接口——按站点口径显示「不设限」';
     }else if(s.balance > 0){
-      bal = '<span class="bal">' + esc(fmtAmount8(s.balance / s.quotaPerUnit, s.currencySymbol)) + '</span>';
-      sub = '原始 ' + fmtNum(s.balance) + ' quota · 1 ' + esc(s.currencySymbol) + ' = ' + fmtNum(s.quotaPerUnit) + ' quota';
+      if(s.balanceUnit){
+        const scale = Number(s.balanceScale) > 0 ? Number(s.balanceScale) : 1;
+        bal = '<span class="bal">' + esc((Number(s.balance) / scale).toLocaleString('zh-CN', {maximumFractionDigits: 2}) + ' ' + s.balanceUnit) + '</span>';
+        sub = balLabel + ' · 原始 ' + fmtNum(s.balance) + ' · 1 ' + esc(s.balanceUnit) + ' = ' + fmtNum(scale);
+      }else{
+        bal = '<span class="bal">' + esc(fmtAmount8(s.balance / s.quotaPerUnit, s.currencySymbol)) + '</span>';
+        sub = '原始 ' + fmtNum(s.balance) + ' quota · 1 ' + esc(s.currencySymbol) + ' = ' + fmtNum(s.quotaPerUnit) + ' quota';
+      }
     }else{
       bal = '<span class="bal muted">未探测</span>';
-      sub = '选该站点后点「检查登录」取真实余额';
+      sub = '选该站点后点「检查登录」取' + balLabel;
     }
     /* 自动采集状态——异常 / 停采在该行直接标出；行内数字始终是本地库已有的数据 */
     const a = autoSites[s.id];
@@ -1111,7 +1134,7 @@ function renderLastCards(){
   if(lastCards) renderCards(lastCards.o, lastCards.sym, lastCards.cur);
 }
 
-let settings = { autoEnabled:true, autoIntervalSeconds:29, incremental:true, silent:true, minIntervalSeconds:3, maxIntervalSeconds:119 };
+let settings = { autoEnabled:true, autoIntervalSeconds:29, incremental:true, silent:true, keepLoginWindow:true, minIntervalSeconds:3, maxIntervalSeconds:119 };
 
 function renderSettings(){
   $('optAuto').checked = settings.autoEnabled;
@@ -1121,6 +1144,7 @@ function renderSettings(){
   $('optIntervalVal').textContent = settings.autoIntervalSeconds + ' s';
   $('optIncremental').checked = settings.incremental;
   $('optSilent').checked = settings.silent;
+  $('optKeepWindow').checked = settings.keepLoginWindow;
 }
 
 /* 工作状态（总览顶部）——按「最近一次提交」距现在多久画进度条：
@@ -1216,7 +1240,8 @@ async function saveSettings(){
     auto: $('optAuto').checked ? 'true' : 'false',
     interval: String($('optInterval').value),
     incremental: $('optIncremental').checked ? 'true' : 'false',
-    silent: $('optSilent').checked ? 'true' : 'false'
+    silent: $('optSilent').checked ? 'true' : 'false',
+    keepWindow: $('optKeepWindow').checked ? 'true' : 'false'
   };
   const r = await fetch('/api/settings', {
     method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)
@@ -1226,6 +1251,7 @@ async function saveSettings(){
   settings.autoIntervalSeconds = r.autoIntervalSeconds;
   settings.incremental = r.incremental;
   settings.silent = r.silent;
+  settings.keepLoginWindow = r.keepLoginWindow;
   renderSettings();
   return true;
 }

@@ -77,7 +77,24 @@ public sealed class BuddySite : IApiSite
     public string CurrencySymbol => _currencySymbol;
 
     /// <summary>
-    /// 登录态探针——在页面上下文内取 localStorage 的 JWT，再读账户信息（含**真实余额** balance）。
+    /// 余额位名称——本站是订阅卡（`balance` 恒 0，余额位没有信息量），按站点口径改看**已用积分**。
+    /// 站点前端口径（实测资产包 `index-*.js`）：`积分 = round(金额 × 1000) / 4`，本账户 id 607 &gt; 468 走积分制。
+    /// </summary>
+    public string BalanceLabel => "已用积分";
+
+    /// <summary>余额位单位——自报「积分」，不折成货币。</summary>
+    public string BalanceUnit => "积分";
+
+    /// <summary>
+    /// 余额位显示除数——库内记的余额位仍是 quota（微元，1 元 = 1e6 quota，金额口径不变），
+    /// 展示时按站点前端公式换成积分：`积分 = round(元 × 1000) / 4` ⇒ `积分 = quota / 4000`。
+    /// </summary>
+    public double BalanceScale => 4000;
+
+    /// <summary>
+    /// 登录态探针——在页面上下文内取 localStorage 的 JWT，读账户信息，并取**累计消耗积分**作为余额位。
+    /// 该站是订阅卡（`balance` 恒 0，余额位没有信息量），故余额位改报 `/usage/stats` 的 `total_actual_cost`
+    /// 按站点前端公式折成的**已用积分**（`round(元 × 1000) / 4`）。
     /// **凭据不出浏览器**：token 由页面内的 fetch 使用，从不回传本进程。
     /// </summary>
     public string LoginProbeScript => @"(async function(){
@@ -94,7 +111,6 @@ public sealed class BuddySite : IApiSite
     var j = JSON.parse(res.body);
     if (!j || j.code !== 0 || !j.data) { return JSON.stringify({ loggedIn: false, reason: 'api-false' }); }
     var u = j.data;
-    var bal = Number(u.balance || 0);
     /* [段1] 用量汇总——/user/profile 不带请求数与消费额，另取一次站点口径（全时段）补齐面板要的那两行 */
     var count = 0, used = 0;
     try {
@@ -108,10 +124,14 @@ public sealed class BuddySite : IApiSite
         }
       }
     } catch (e) {}
+    /* [段2] 余额位口径——本站是订阅卡（balance 恒 0，余额位没信息量），改报**累计消耗积分**。
+       站点前端口径（实测资产包）：积分 = round(元 × 1000) / 4；本程序库内余额位仍是微元 quota，
+       故先把积分折回 quota（× 4000），展示时按 BalanceScale 除回来——换算往返无损。 */
+    var points = Math.round(used * 1000) / 4;
     return JSON.stringify({ loggedIn: true,
       username: u.username || u.name || u.nickname || u.email || ('#' + (u.id || 0)),
       userId: u.id || 0,
-      quota: Math.round(bal * 1000000),
+      quota: Math.round(points * 4000),
       usedQuota: Math.round(used * 1000000),
       requestCount: count,
       group: u.group || u.plan || '',

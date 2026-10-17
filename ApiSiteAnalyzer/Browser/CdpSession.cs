@@ -82,6 +82,53 @@ public sealed class CdpSession : IAsyncDisposable
     {
         return ConnectCoreAsync(null, pageSocketUrl, timeoutMs, ct);
     }
+    /// <summary>
+    /// 优雅关闭一个受控实例——走 CDP `Browser.close`（浏览器自己收尾：刷盘 cookie / 用户目录、正常退出），
+    /// 而不是直接结束进程树。**为什么值得多这一步**：硬杀进程会让 chrome 抛「未正常关闭」的脏标记，
+    /// 而站点登录态就存在这个用户目录里——优雅退出把登录态写稳，是「不易掉登录」的第一道保险。
+    /// 失败一律返回 false，由调用方回落硬杀（不静默：调用方据返回值决定）。
+    /// </summary>
+    /// <param name="port">调试端口。</param>
+    /// <param name="timeoutMs">等回执的上限（毫秒）。</param>
+    /// <param name="ct">取消令牌。</param>
+    /// <returns>已发出关闭指令返回 true。</returns>
+    public static async Task<bool> CloseBrowserAsync(int port, int timeoutMs, CancellationToken ct)
+    {
+        try
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromMilliseconds(timeoutMs) };
+            string versionText = await http.GetStringAsync("http://127.0.0.1:" + port + "/json/version", ct).ConfigureAwait(false);
+
+            string socketUrl = "";
+            using (JsonDocument doc = JsonDocument.Parse(versionText))
+            {
+                if (doc.RootElement.TryGetProperty("webSocketDebuggerUrl", out JsonElement ws))
+                {
+                    socketUrl = ws.GetString() ?? "";
+                }
+            }
+
+            if (socketUrl.Length == 0)
+            {
+                return false;
+            }
+
+            using var socket = new ClientWebSocket();
+            using var connectCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            connectCts.CancelAfter(timeoutMs);
+            await socket.ConnectAsync(new Uri(socketUrl), connectCts.Token).ConfigureAwait(false);
+
+            byte[] payload = Encoding.UTF8.GetBytes("{\"id\":1,\"method\":\"Browser.close\"}");
+            await socket.SendAsync(new ArraySegment<byte>(payload), WebSocketMessageType.Text, true, connectCts.Token).ConfigureAwait(false);
+
+            // [段1] 不等回执——浏览器关掉时通道会先断，等回执必然超时；发出去即算成功，退出由调用方等进程
+            return true;
+        }
+        catch (Exception ex) when (ex is HttpRequestException || ex is WebSocketException || ex is OperationCanceledException || ex is JsonException)
+        {
+            return false;
+        }
+    }
 
     /// <summary>建立页面级 CDP 连接并启动消息泵。</summary>
     private static async Task<CdpSession> ConnectCoreAsync(ChromeProcess? chrome, string pageSocketUrl, int timeoutMs, CancellationToken ct)

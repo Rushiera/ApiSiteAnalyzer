@@ -175,6 +175,7 @@ public static class Program
     {
         var hub = new BrowserHub(chromePath, Path.Combine(dataDir, "browsers.json"));
         hub.Silent = ReadSilentSetting(dataDir);
+        hub.KeepWindow = ReadKeepWindowSetting(dataDir);
         var session = new SiteSession(hub);
 
         int notLoggedIn = 0;
@@ -183,8 +184,21 @@ public static class Program
             LoginState state = await session.ProbeLoginAsync(site, ct).ConfigureAwait(false);
             if (state.LoggedIn)
             {
+                /* 余额位按站点自报的口径打印——货币站折成金额（8 位小数），自报单位的站（如积分）除回该单位 */
+                string balanceText;
+                if (site.BalanceUnit.Length > 0)
+                {
+                    double scale = site.BalanceScale > 0 ? site.BalanceScale : 1;
+                    balanceText = (state.Quota / scale).ToString("0.##") + " " + site.BalanceUnit;
+                }
+                else
+                {
+                    balanceText = (state.Quota / site.QuotaPerUnit).ToString("0.00000000") + " " + site.CurrencySymbol;
+                }
+
                 Console.WriteLine("[已登录] " + site.DisplayName + " · 用户 " + state.Username +
-                    " · 余额 " + state.Quota + " · 已用 " + state.UsedQuota + " · 请求数 " + state.RequestCount);
+                    " · " + site.BalanceLabel + " " + balanceText +
+                    " · 已用 " + state.UsedQuota + " · 请求数 " + state.RequestCount);
             }
             else
             {
@@ -208,6 +222,7 @@ public static class Program
     {
         var hub = new BrowserHub(chromePath, Path.Combine(dataDir, "browsers.json"));
         hub.Silent = ReadSilentSetting(dataDir);
+        hub.KeepWindow = ReadKeepWindowSetting(dataDir);
         var session = new SiteSession(hub);
 
         using var db = new Db(Path.Combine(dataDir, "usage.db"));
@@ -240,8 +255,18 @@ public static class Program
             db.MarkFetched(site.Id, rows);
             Console.WriteLine("  完成：拉取 " + summary.Pages + " 页 / " + summary.Fetched + " 条 · 新增 " + summary.Added +
                 " 条 · 库内 " + rows + " 行" + (summary.StoppedEarly ? " · 已追平历史（提前停止）" : ""));
-            Console.WriteLine("  真实余额：" + summary.Balance + " quota = " +
-                (summary.Balance / site.QuotaPerUnit).ToString("0.0000") + " " + site.CurrencySymbol);
+
+            /* 余额位按站点自报的口径打印——货币站折成金额，自报单位的站（如积分）除回该单位 */
+            if (site.BalanceUnit.Length > 0)
+            {
+                double scale = site.BalanceScale > 0 ? site.BalanceScale : 1;
+                Console.WriteLine("  " + site.BalanceLabel + "：" + (summary.Balance / scale).ToString("0.##") + " " + site.BalanceUnit);
+            }
+            else
+            {
+                Console.WriteLine("  " + site.BalanceLabel + "：" + summary.Balance + " quota = " +
+                    (summary.Balance / site.QuotaPerUnit).ToString("0.0000") + " " + site.CurrencySymbol);
+            }
 
             if (summary.Snapshot is not null)
             {
@@ -269,6 +294,7 @@ public static class Program
 
         var hub = new BrowserHub(chromePath, Path.Combine(dataDir, "browsers.json"));
         hub.Silent = ReadSilentSetting(dataDir);
+        hub.KeepWindow = ReadKeepWindowSetting(dataDir);
         var session = new SiteSession(hub);
 
         string outDir = Path.Combine(dataDir, "probe");
@@ -453,6 +479,15 @@ public static class Program
     {
         var settings = new PanelSettings(Path.Combine(dataDir, "settings.json"));
         return settings.Silent;
+    }
+
+    /// <summary>读面板设置里的「登录窗口保活」开关（无设置文件 = 默认开）——CLI 与面板走同一份设置。</summary>
+    /// <param name="dataDir">数据目录。</param>
+    /// <returns>是否保活。</returns>
+    private static bool ReadKeepWindowSetting(string dataDir)
+    {
+        var settings = new PanelSettings(Path.Combine(dataDir, "settings.json"));
+        return settings.KeepLoginWindow;
     }
 
     /// <summary>未知子命令——出声并非零退出。</summary>

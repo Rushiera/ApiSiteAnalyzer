@@ -84,6 +84,15 @@ public sealed class SiteBlock
     /// <summary>每货币单位 quota 数（余额折算用）。</summary>
     public double QuotaPerUnit { get; set; }
 
+    /// <summary>余额位名称（站点自报；默认「真实余额」）。</summary>
+    public string BalanceLabel { get; set; } = "真实余额";
+
+    /// <summary>余额位单位（空 = 货币；非空 = 该站自报单位，按 BalanceScale 折算后显示）。</summary>
+    public string BalanceUnit { get; set; } = "";
+
+    /// <summary>余额位显示除数（货币站 1；自报单位的站按自己的换算给除数）。</summary>
+    public double BalanceScale { get; set; } = 1;
+
     /// <summary>货币符号。</summary>
     public string CurrencySymbol { get; set; } = "";
 
@@ -264,6 +273,9 @@ public static class SiteAggregate
                 UnlimitedBalance = channel == "apikey",
                 QuotaPerUnit = unit,
                 CurrencySymbol = site.CurrencySymbol,
+                BalanceLabel = site.BalanceLabel,
+                BalanceUnit = site.BalanceUnit,
+                BalanceScale = site.BalanceScale <= 0 ? 1 : site.BalanceScale,
                 LastFetchAt = db.LastFetchAt(site.Id),
             });
         }

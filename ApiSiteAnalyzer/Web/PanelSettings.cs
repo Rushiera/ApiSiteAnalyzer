@@ -57,6 +57,14 @@ public sealed class PanelSettings
     /// </summary>
     public bool Silent { get; set; } = true;
 
+    /// <summary>
+    /// 登录窗口保活——true（默认）：已开着可见窗口时**不再为了静默采集把它停掉**，采集直接复用那个窗口。
+    /// 站点会话活在窗口里（贤鱼的 access_token 只在页面内存，靠站点自己的 SPA 续），
+    /// 杀掉实例 = 把会话打回要重新换取的状态——保活是「不易掉登录」的关键，
+    /// 代价是采集期间会有一个可见窗口。false = 旧行为（采集前停旧起新切 headless）。
+    /// </summary>
+    public bool KeepLoginWindow { get; set; } = true;
+
     /// <summary>卡片顺序（拖拽排定的卡片键序列）——与自动采集设置同一份文件，换浏览器 / 清缓存都不丢。</summary>
     public List<string> CardOrder { get; set; } = new List<string>(DefaultCardOrder);
 
@@ -181,6 +189,14 @@ public sealed class PanelSettings
         Save();
     }
 
+    /// <summary>设置登录窗口保活并落盘。</summary>
+    /// <param name="keep">是否保活（已开的可见窗口不再为静默停掉）。</param>
+    public void SetKeepLoginWindow(bool keep)
+    {
+        KeepLoginWindow = keep;
+        Save();
+    }
+
     /// <summary>更新设置并落盘。</summary>
     /// <param name="autoEnabled">自动采集开关。</param>
     /// <param name="intervalSeconds">间隔（秒）。</param>
@@ -215,6 +231,8 @@ public sealed class PanelSettings
             Incremental = loaded.Incremental;
             /* 旧设置文件没有 silent（DTO 默认 true）→ 静默——升级后默认不再弹窗口 */
             Silent = loaded.Silent;
+            /* 旧设置文件没有 keepLoginWindow（DTO 默认 true）→ 保活——升级后不再为静默杀会话 */
+            KeepLoginWindow = loaded.KeepLoginWindow;
             /* 旧设置文件没有 cardOrder（读到 null）→ 给全默认顺序——不静默丢卡片 */
             CardOrder = NormalizeCardOrder(loaded.CardOrder);
         }
@@ -237,6 +255,7 @@ public sealed class PanelSettings
             AutoIntervalSeconds = AutoIntervalSeconds,
             Incremental = Incremental,
             Silent = Silent,
+            KeepLoginWindow = KeepLoginWindow,
             CardOrder = CardOrder,
         };
 
@@ -278,6 +297,9 @@ public sealed class PanelSettings
 
         /// <summary>是否静默采集（headless）。</summary>
         public bool Silent { get; set; } = true;
+
+        /// <summary>登录窗口保活（已开的可见窗口不再为静默停掉）。</summary>
+        public bool KeepLoginWindow { get; set; } = true;
 
         /// <summary>卡片顺序（卡片键序列）——缺即 null，由 Load 补全默认顺序。</summary>
         public List<string>? CardOrder { get; set; }

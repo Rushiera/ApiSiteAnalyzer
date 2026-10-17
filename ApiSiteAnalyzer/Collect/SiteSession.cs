@@ -403,7 +403,8 @@ public sealed class SiteSession
     /// <summary>
     /// 打开登录页——**在通道标签页里导航**（钩子已就位，登录响应里的 access_token 会被页面内钩子捕获并留在页面里）。
     /// **强制可见窗口**：静默模式下受控实例是 headless，这里换成窗口实例（停旧起新）——登录归人，人得看得见。
-    /// 登录完点「检查登录」，那时再按设置切回静默。
+    /// 登录完点「检查登录」：登录窗口保活开着时**窗口留着**（会话就在这个窗口里），
+    /// 关掉保活才按旧行为切回静默。
     /// </summary>
     /// <param name="site">站点适配器。</param>
     /// <param name="ct">取消令牌。</param>
@@ -449,14 +450,20 @@ public sealed class SiteSession
             return (false, null);
         }
 
-        // [段2] 当前实例已是静默（或没有实例）——无需切换
+        // [段2] 登录窗口保活——窗口留着，采集直接复用它（停掉实例 = 把页面里的会话打回要重新换取的状态）
+        if (_hub.KeepWindow)
+        {
+            return (false, null);
+        }
+
+        // [段3] 当前实例已是静默（或没有实例）——无需切换
         BrowserInstance? alive = await _hub.FindAliveAsync(site.ProfileDir).ConfigureAwait(false);
         if (alive is null || alive.Headless)
         {
             return (false, null);
         }
 
-        // [段3] 换成静默实例（模式不符会停旧起新）并复探登录态
+        // [段4] 换成静默实例（模式不符会停旧起新）并复探登录态
         await _hub.EnsureAsync(site.ProfileDir, site.BaseUrl, ct).ConfigureAwait(false);
 
         CdpSession session = await OpenSessionAsync(site, ct).ConfigureAwait(false);

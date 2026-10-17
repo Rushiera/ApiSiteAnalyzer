@@ -42,6 +42,7 @@ public static class ServeRunner
         var settings = new PanelSettings(Path.Combine(dataDir, "settings.json"));
         var hub = new BrowserHub(chromePath, Path.Combine(dataDir, "browsers.json"));
         hub.Silent = settings.Silent;
+        hub.KeepWindow = settings.KeepLoginWindow;
         var session = new SiteSession(hub);
         var queue = new TaskQueue();
         var dbPath = Path.Combine(dataDir, "usage.db");
@@ -86,6 +87,9 @@ public static class ServeRunner
                     profileDir = site.ProfileDir,
                     quotaPerUnit = site.QuotaPerUnit,
                     currencySymbol = site.CurrencySymbol,
+                    balanceLabel = site.BalanceLabel,
+                    balanceUnit = site.BalanceUnit,
+                    balanceScale = site.BalanceScale,
                     rows = db.Count(site.Id),
                     lastFetchAt = db.LastFetchAt(site.Id),
                     snapshot = snapshot is null ? null : new
@@ -122,6 +126,7 @@ public static class ServeRunner
                     autoIntervalSeconds = settings.AutoIntervalSeconds,
                     incremental = settings.Incremental,
                     silent = settings.Silent,
+                    keepLoginWindow = settings.KeepLoginWindow,
                     minIntervalSeconds = PanelSettings.MinIntervalSeconds,
                     maxIntervalSeconds = PanelSettings.MaxIntervalSeconds,
                     cardOrder = settings.CardOrder,
@@ -160,6 +165,13 @@ public static class ServeRunner
                 return Results.Json(new { ok = false, error = "silent 必须是 true / false，收到：" + silent });
             }
 
+            // [段2] 登录窗口保活——可选字段（缺省 = 不改）；true = 已开的可见窗口不再为静默停掉
+            string keep = await ReadFieldAsync(context, "keepWindow");
+            if (keep.Length > 0 && keep != "true" && keep != "false")
+            {
+                return Results.Json(new { ok = false, error = "keepWindow 必须是 true / false，收到：" + keep });
+            }
+
             settings.Update(auto == "true", seconds, incremental == "true");
 
             bool silentChanged = false;
@@ -167,6 +179,13 @@ public static class ServeRunner
             {
                 settings.SetSilent(silent == "true");
                 hub.Silent = settings.Silent;
+                silentChanged = true;
+            }
+
+            if (keep.Length > 0 && settings.KeepLoginWindow != (keep == "true"))
+            {
+                settings.SetKeepLoginWindow(keep == "true");
+                hub.KeepWindow = settings.KeepLoginWindow;
                 silentChanged = true;
             }
 
@@ -178,6 +197,7 @@ public static class ServeRunner
                 autoIntervalSeconds = settings.AutoIntervalSeconds,
                 incremental = settings.Incremental,
                 silent = settings.Silent,
+                keepLoginWindow = settings.KeepLoginWindow,
                 silentChanged = silentChanged,
             });
         });
@@ -1027,6 +1047,9 @@ public static class ServeRunner
             unlimitedBalance = block.UnlimitedBalance,
             quotaPerUnit = block.QuotaPerUnit,
             currencySymbol = block.CurrencySymbol,
+            balanceLabel = block.BalanceLabel,
+            balanceUnit = block.BalanceUnit,
+            balanceScale = block.BalanceScale,
             lastFetchAt = block.LastFetchAt,
         };
     }
