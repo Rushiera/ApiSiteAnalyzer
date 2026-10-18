@@ -5,6 +5,7 @@ API 站用量分析器（**C# / .NET 8**）。把 API 站的用量日志**全量
 首站：贤鱼 API（`https://api.xyjun.fun`，New API v1.0.0-rc.40）。
 第二站：`http://47.250.160.225:8443`（New API · **API key 直连 · 特批**——见下文「API key 直连」）。
 第三站：`https://buddy.mewbius.com`（**知序空间**，非 New API 系 · 自研面板 JWT）——见下文「知序空间适配器」。
+第四站：`https://buddy.mewbius.com`（**知序空间2**——与第三站**同一平台的不同账号**；站点键 `buddy2`、用户目录 `data/profiles/buddy2`，数据按站点键分开）——见下文「同一平台多账号」。
 
 > 架构与选型 → `CCBP:Project/ApiSiteAnalyzer/design-ApiSiteAnalyzer.md` §〇。
 
@@ -225,7 +226,7 @@ CLI 同样走这条通道：`ApiSiteAnalyzer_A.exe fetch` 会为每个站点选�
 |:--|:--|:--|:--|
 | 贤鱼 API | 真实余额 | `/api/user/self` → `quota` | `quota / quotaPerUnit`，配货币符号（8 位小数） |
 | New API 47 | 不设限 | 无余额接口（key 通道 401） | 如实显示「不设限」 |
-| **知序空间** | **已用积分** | `/api/v1/usage/stats` → `total_actual_cost`（**全部累计消耗**） | `元 × 250` = 积分（**本地写死**换算比，不读站点推导），显示「164.26 积分」 |
+| **知序空间** / **知序空间2** | **已用积分** | `/api/v1/usage/stats` → `total_actual_cost`（**全部累计消耗**） | `元 × 250` = 积分（**本地写死**换算比，不读站点推导），显示「164.26 积分」；**两账号同口径、各算各的**（数据按站点键分区） |
 
 知序空间是订阅卡（`balance` 恒 0，余额位没信息量），故余额位改报**已用积分**。
 
@@ -408,6 +409,21 @@ CLI 同样走这条通道：`ApiSiteAnalyzer_A.exe fetch` 会为每个站点选�
 | 记录字段 | `id` / `request_id` / `created_at`（ISO8601 带时区）/ `model` / `reasoning_effort` / `input_tokens` / `output_tokens` / `cache_read_tokens` / `cache_creation_tokens` / `actual_cost` / `duration_ms` / `first_token_ms` / `request_type` / `api_key.name` / `group.name` |
 | 金额换算比 | `quotaPerUnit: 1000000`（1 元 = 1e6 quota——`actual_cost` 是终值，折成整数只为落库；金额仍由 `quota / quotaPerUnit` 派生） |
 | 取不到的 | 失败请求明细（`/api/v1/usage/errors` 403 关着）；无 API key 直连通道（`sk-` 只服务补全接口，调面板接口回 `INVALID_TOKEN`） |
+
+### 同一平台多账号（`buddy` / `buddy2`）
+
+同一平台可配**多个账号**——一个账号一个站点键，各自一条 `config.json` 条目（`type` 仍是 `buddy`、`baseUrl` 相同、`displayName` 区分），互不串：
+
+| 账号 | 站点键 | 显示名 | 用户目录 |
+|:--|:--|:--|:--|
+| 主账号 | `buddy` | 知序空间 | `data/profiles/buddy` |
+| 第二账号 | `buddy2` | 知序空间2 | `data/profiles/buddy2` |
+
+- **区分靠用户目录，不靠站点地址**——登录态活在浏览器用户目录里；两账号目录不同 = 两个浏览器实例、两份 localStorage JWT，互不覆盖（同目录才是真冲突，判例 15）
+- **数据按站点键分区**——库内 `site` 列 / 站点下拉 / 总览站点表一站一行 / 自动采集与降级各算各的，`buddy2` 的记录不会混进 `buddy`
+- **登录各自一次**——新账号的用户目录是空的，需在面板「去登录」登录一次（邮箱 + 密码），之后免登录；`profileDir` 留空即自动落 `data/profiles/<站点键>`
+- **余额位 / 站点口径各自一份**——`/api/v1/usage/stats` 按账号返回，两账号各显示自己的「已用积分」
+- **兑换码充值**——面板不读也不写兑换；兑换码由我代填（Rushiera 定案 2026-10-18：兑换码一次性、用后作废，不算长期凭据，可记录可代填）：`POST /api/v1/redeem` `{"code":"…"}`（页面上下文 + `Bearer` 头，台账与方法见 `data/notes-redeem.md`）。码仍不进 `config.json` / 本文（随 git 推公开仓），只落 `data/`
 
 ### 该站还能取到但本工具暂不采集的（侦察记录）
 
