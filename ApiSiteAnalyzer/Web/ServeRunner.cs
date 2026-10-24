@@ -453,7 +453,7 @@ public static class ServeRunner
                 return Results.Json(new { ok = false, error = "未知站点：" + siteId });
             }
 
-            if (site is not NewApiSite direct)
+            if (site is not IDirectSite direct)
             {
                 return Results.Json(new { ok = false, error = "该站点走浏览器登录通道，不接受 API key" });
             }

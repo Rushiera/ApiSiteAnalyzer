@@ -8,6 +8,13 @@ public sealed class UsagePage
     /// <summary>服务端报告的总条数（-1 = 未提供）。</summary>
     public int Total { get; set; } = -1;
 
+    /// <summary>
+    /// 余额位（quota 单位；0 = 本次未取到）。
+    /// 直连站点的取数响应里可能自带额度信息（如 sub2api 网关给「今日额度剩余」），
+    /// 与逐条记录同一次请求取回——省掉一次额外探活。
+    /// </summary>
+    public long BalanceQuota { get; set; }
+
     /// <summary>本页原始记录（JSON 文本，逐条保留——解析失败可事后重跑）。</summary>
     public List<string> Records { get; set; } = new List<string>();
 }

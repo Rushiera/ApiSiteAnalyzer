@@ -3,7 +3,7 @@
 API 站用量分析器（**C# / .NET 8**）。把 API 站的用量日志**全量**拉全、落库留存、做多维分析——取代在站点网页里逐页翻。
 
 首站：贤鱼 API（`https://api.xyjun.fun`，New API v1.0.0-rc.40）。
-第二站：`http://47.250.160.225:8443`（New API · **API key 直连 · 特批**——见下文「API key 直连」）。
+第二站：`https://time.api.freeshare.tech`（**时长卡 · sub2api 网关 · API key 直连**——原 `http://47.250.160.225:8443` New API 站已迁移，旧站现回 410；见下文「时长卡（sub2api 网关）适配器」）。
 第三站：`https://buddy.mewbius.com`（**知序空间**，非 New API 系 · 自研面板 JWT）——见下文「知序空间适配器」。
 第四站：`https://buddy.mewbius.com`（**知序空间2**——与第三站**同一平台的不同账号**；站点键 `buddy2`、用户目录 `data/profiles/buddy2`，数据按站点键分开）——见下文「同一平台多账号」。
 
@@ -16,7 +16,7 @@ ApiSiteAnalyzer/                主项目
   Config/                       配置加载（严格模式——未知键 / 类型错报错退出）
   Browser/                      CDP 通道（chrome 启动器 / 会话 / 受控实例中心）
   Collect/                      站点会话（登录探测 + 分页拉取 + 口径快照）+ 逐页落库器
-  Sites/                        站点适配器（IApiSite + NewApiSite + BuddySite）
+  Sites/                        站点适配器（IApiSite + IDirectSite + NewApiSite + BuddySite + Sub2ApiSite）
   Store/                        SQLite 库（幂等写入 + 增量比对 + 聚合查询）
   Web/                          Minimal API 端点 + 自动采集器 + 工作状态监视器 + 跨站聚合器（SiteAggregate）+ wwwroot/index.html
 config.json                     站点清单 + 端口 + chrome 路径
@@ -160,15 +160,15 @@ access_token 只活在页面里（`window.__asaToken`），从不回传程序进
 
 ## API key 直连（**特批站点**）
 
-`47.250.160.225:8443` 一站走 **API key 直连**——不经浏览器、不需要登录：
+`time.api.freeshare.tech`（时长卡 · sub2api 网关，原 `47.250.160.225:8443` 已迁移下线）一站走 **API key 直连**——不经浏览器、不需要登录：
 
 | 项 | 说明 |
 |:--|:--|
 | 为什么特批 | 该站**没有用户名与密码设置**、**API key 不二次提供**（签发只显示一次，丢了取不回）、**全部功能仅认这一个唯一 id**——没有「登录归人」的路径可走；Rushiera **单笔授权 · 仅此一次 · 仅限该站** |
 | key 存哪 | `data/keys.json`（不入仓）。**不写 `config.json`**——那文件随 git 推公开仓 |
 | 怎么改 | 面板顶部「API Key」框里**明文**改 → 点「保存」→ 立即生效，并回执探活结果（有效 / 无效 + 账号 + 本次可见条数） |
-| 取数 | `GET /api/log/token` + `Authorization: Bearer <key>`——**一次请求拿全量**（该接口忽略分页与过滤参数） |
-| 拿不到什么 | 真实余额、站点口径——该站对 key 一律 401（面板如实显示「该站无此接口」） |
+| 取数 | `GET /api/overview?key=<key>`——**一次请求拿最新 20 条**（该端点忽略分页与条数参数，站点不给全量明细） |
+| 拿不到什么 | 逐条全量历史、`request_id`、缓存 token、站点口径快照（面板按实况显示） |
 | 限流 | 短时密集请求会 429；直连一轮只发一次请求，天然避开 |
 
 CLI 同样走这条通道：`ApiSiteAnalyzer_A.exe fetch` 会为每个站点选自己的通道（浏览器 / 直连），落库口径仍是同一份 `PageWriter`。
@@ -393,6 +393,42 @@ CLI 同样走这条通道：`ApiSiteAnalyzer_A.exe fetch` 会为每个站点选�
     站点口径，落 `data/probe/<站点>-<时间戳>.txt` + 首条记录单写 `-record.json`）、**分页实况**（两档条数 + `total`）、
     **端点普查**（候选端点逐个 GET，回状态码 / 长度 / 响应开头——`IApiSite.ProbePaths` 声明候选）。
     「有哪些数据可取」由真实响应回答，不靠读前端源码推断。**只读**：全 GET，不改站点状态。
+39. **旧站是「永久移除」而不是暂时故障**（2026-10-24）——`http://47.250.160.225:8443/api/status` 回 **410 Gone**，
+    `/api/log/token` 随之失效。采集自 2026-10-23 03:31 起停摆（库内 `last_fetch_at` 即停摆时刻）。
+    判据：迁移换域名时先探旧站状态码——410 = 站点方主动下线，不是网络抖动。
+40. **sub2api 网关没有逐条全量日志接口**（2026-10-24 实测）——新站是 sub2api（`Wei-Shaw/sub2api`）网关 + 站长自建卡密门户：
+    门户端点 `GET /api/overview?key=<key>` 返回账户 + 聚合 + **最新 20 条**调用；`GET /v1/usage`（Bearer key）只给按天 / 按模型的聚合。
+    逐条明细的用户面接口 `/api/v1/usage` 要 **JWT 登录**（本站卡密体系没有账号密码可登），
+    `/api/log/token`、`/api/logs`、`/api/records`、`/api/user/self` 一律 404。
+    门户的 `20 / 50 / 100` 切换**只是前端对同一份 20 条数组做切片**——`n` / `limit` / `log_n` / `page` / `page_size` 实测全被忽略（响应字节数不变）。
+    故本站逐条记录只能取最新 20 条、靠自动采集（默认 29s）滚动追平；两次采集之间超过 20 次调用会漏采，站点不提供漏采判据。
+41. **逐条记录没有 `request_id`**（2026-10-24）——门户 logs 只有 `time`（`MM-dd HH:mm:ss`，**无年份**）/ `model` / `tokens_in` /
+    `tokens_out` / `cost` / `duration_ms` / `ttft_ms` / `stream`。库内主键改由「时刻 + 模型 + 两向 token + 耗时」合成
+    （同一行重复拉取恒得同一键 → 幂等；同秒同值同耗时的两次调用无法区分，会被并成一条）。
+    时刻按当年解释，解出未来两天之后的回退一年（跨年边界）。
+42. **金额是终值，且必须与本站历史记录同单位**（2026-10-24）——站点给 `cost`（美元，含倍率），
+    适配器按 `quotaPerUnit = 5000000` 折成整数落库（沿用本站旧站的口径）——若换成 1e6，同一张表里
+    新旧记录差 5 倍，历史金额会被整体读错。**换单位前先看历史记录用的是什么**。
+
+## 时长卡（sub2api 网关）适配器
+
+站点键 `newapi47`（沿用历史键——库内 6 万+ 行按站点键分区，改键等于把历史数据割出去）· `type: "sub2api"` ·
+`baseUrl: "https://time.api.freeshare.tech"`。原 New API 站 `47.250.160.225:8443` 已迁移并下线（410）。
+
+| 项 | 实况（2026-10-24 实测） |
+|:--|:--|
+| 通道 | **API key 直连**（`IDirectSite`）——卡密体系没有账号密码可登，浏览器通道无处可登 |
+| 取数端点 | `GET /api/overview?key=<API key>`（门户自建端点，key 走查询参数） |
+| 逐条记录 | 只有**最新 20 条**（无分页、无总数、无 `request_id`）；由自动采集滚动追补 |
+| 聚合端点 | `GET /v1/usage`（Bearer key）→ 按天 / 按模型 / 限额；本工具**暂不消费**（逐条入库是主口径） |
+| 记录字段 | `time`（`MM-dd HH:mm:ss` 无年份）/ `model` / `tokens_in` / `tokens_out` / `cost` / `duration_ms` / `ttft_ms` / `stream` |
+| 余额位 | 「**今日剩余额度**」= `daily_limit_usd - daily_usage_usd`（按日重置的限额，不是账户余额） |
+| 金额换算比 | `quotaPerUnit: 5000000`（沿用本站历史口径；`cost` 是美元终值） |
+| 取不到的 | 逐条全量历史、`request_id`、缓存 token、上游模型、令牌名 / 分组名、站点口径快照 |
+| 通道说明 | TLS/连接抖动实测出现过一次（SSL handshake 失败，随后即恢复）——直连取数带 3 次连接层重试；HTTP 状态类失败不重试，照原样出声 |
+
+**漏采边界（如实告知）**：两次采集之间若超过 20 次调用，最早的那些记录站点已不再给出——属不可恢复的数据缺口，
+站点也不提供「漏了多少」的判据。基准间隔 29s 下，实测本机使用强度（约 2 次/分钟）远低于该上限。
 
 ## 知序空间（`buddy.mewbius.com`）适配器
 

@@ -97,7 +97,7 @@ public sealed class SiteSession
     public async Task<LoginState> ProbeLoginAsync(IApiSite site, CancellationToken ct)
     {
         // [段0] API key 直连站点（特批）——不经浏览器，直接用 key 调取数接口探活
-        if (site is NewApiSite direct && direct.ApiKey.Length > 0)
+        if (site is IDirectSite direct && direct.ApiKey.Length > 0)
         {
             return await ProbeDirectAsync(direct, ct).ConfigureAwait(false);
         }
@@ -174,7 +174,7 @@ public sealed class SiteSession
         CancellationToken ct)
     {
         // [段0] API key 直连站点（特批）——一次请求拿全量，不经浏览器
-        if (site is NewApiSite direct && direct.ApiKey.Length > 0)
+        if (site is IDirectSite direct && direct.ApiKey.Length > 0)
         {
             return await FetchDirectAsync(direct, options, onPage, progress, ct).ConfigureAwait(false);
         }
@@ -298,7 +298,7 @@ public sealed class SiteSession
         var result = new ProbeResult();
 
         // [段0] API key 直连站点（特批）——没有浏览器会话可侦察，出声拒绝
-        if (site is NewApiSite direct && direct.ApiKey.Length > 0)
+        if (site is IDirectSite direct && direct.ApiKey.Length > 0)
         {
             result.Error = "该站点走 API key 直连通道，无浏览器会话可侦察";
             return result;
@@ -412,7 +412,7 @@ public sealed class SiteSession
     public async Task<BrowserInstance> OpenLoginAsync(IApiSite site, CancellationToken ct)
     {
         // [段0] API key 直连站点（特批）——没有浏览器登录这回事，出声拒绝（不静默什么都不做）
-        if (site is NewApiSite direct && direct.ApiKey.Length > 0)
+        if (site is IDirectSite direct && direct.ApiKey.Length > 0)
         {
             throw new InvalidOperationException("该站点走 API key 直连通道，不需要浏览器登录");
         }
@@ -439,7 +439,7 @@ public sealed class SiteSession
     public async Task<(bool Switched, LoginState? Login)> SwitchToSilentAsync(IApiSite site, CancellationToken ct)
     {
         // [段0] 直连站没有浏览器实例这回事
-        if (site is NewApiSite direct && direct.ApiKey.Length > 0)
+        if (site is IDirectSite direct && direct.ApiKey.Length > 0)
         {
             return (false, null);
         }
@@ -690,21 +690,56 @@ public sealed class SiteSession
     /// <param name="site">站点适配器（ApiKey 非空）。</param>
     /// <param name="ct">取消令牌。</param>
     /// <returns>原始 JSON 响应体。</returns>
-    private static async Task<string> GetDirectAsync(NewApiSite site, CancellationToken ct)
+    private static async Task<string> GetDirectAsync(IDirectSite site, CancellationToken ct)
     {
-        using var request = new HttpRequestMessage(HttpMethod.Get, site.BuildUsageUrl());
-        request.Headers.Add("Authorization", "Bearer " + site.ApiKey);
+        string url = site.BuildUsageUrl();
 
-        using HttpResponseMessage response = await DirectHttp.SendAsync(request, ct).ConfigureAwait(false);
-        string body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-
-        if (!response.IsSuccessStatusCode)
+        // [段1] 连接层重试——TLS / 连接抖动实测出现过（一次 SSL handshake 失败，随后即恢复）；
+        //        自动采集间隔 29s，单次抖动不该让整轮记为失败。HTTP 状态类失败不重试（照原样出声）。
+        Exception? last = null;
+        for (int attempt = 0; attempt < 3; attempt++)
         {
-            string hint = (int)response.StatusCode == 429 ? "（站点限流——短时密集请求会触发，稍后再试）" : "";
-            throw new InvalidOperationException("取数接口返回 HTTP " + (int)response.StatusCode + hint + "：" + Truncate(body, 200));
+            if (attempt > 0)
+            {
+                await Task.Delay(400 * attempt, ct).ConfigureAwait(false);
+            }
+
+            try
+            {
+                using var request = new HttpRequestMessage(HttpMethod.Get, url);
+                request.Headers.Add("Authorization", "Bearer " + site.ApiKey);
+
+                using HttpResponseMessage response = await DirectHttp.SendAsync(request, ct).ConfigureAwait(false);
+                string body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    int code = (int)response.StatusCode;
+
+                    // [段2] 网关 5xx 属瞬时故障（实测 502 一次，随即恢复）——重试；4xx 是确定性失败，照原样出声
+                    if (code == 500 || code == 502 || code == 503 || code == 504)
+                    {
+                        last = new InvalidOperationException("取数接口返回 HTTP " + code + "：" + Truncate(body, 200));
+                        continue;
+                    }
+
+                    string hint = code == 429 ? "（站点限流——短时密集请求会触发，稍后再试）" : "";
+                    throw new InvalidOperationException("取数接口返回 HTTP " + code + hint + "：" + Truncate(body, 200));
+                }
+
+                return body;
+            }
+            catch (HttpRequestException ex)
+            {
+                last = ex;
+            }
+            catch (TaskCanceledException ex) when (!ct.IsCancellationRequested)
+            {
+                last = ex;
+            }
         }
 
-        return body;
+        throw new InvalidOperationException("取数接口连续 3 次连接失败：" + (last is null ? "未知原因" : last.Message));
     }
     /// <summary>
     /// 直连探活——用 API key 调一次取数接口，能拿到记录即视为凭据有效（**特批通道**）。
@@ -714,24 +749,21 @@ public sealed class SiteSession
     /// <param name="site">站点适配器（ApiKey 非空）。</param>
     /// <param name="ct">取消令牌。</param>
     /// <returns>登录态结果（LoggedIn = 凭据可用）。</returns>
-    private static async Task<LoginState> ProbeDirectAsync(NewApiSite site, CancellationToken ct)
+    private static async Task<LoginState> ProbeDirectAsync(IDirectSite site, CancellationToken ct)
     {
         try
         {
             string body = await GetDirectAsync(site, ct).ConfigureAwait(false);
             UsagePage page = site.ParseUsagePage(body);
 
-            var state = new LoginState { LoggedIn = true, RequestCount = page.Records.Count, Message = "API key 有效" };
-            if (page.Records.Count > 0)
+            var state = new LoginState
             {
-                using JsonDocument doc = JsonDocument.Parse(page.Records[0]);
-                JsonElement root = doc.RootElement;
-                if (root.TryGetProperty("username", out JsonElement user) && user.ValueKind == JsonValueKind.String)
-                {
-                    state.Username = user.GetString() ?? "";
-                }
-            }
-
+                LoggedIn = true,
+                Username = site.DescribeAccount(body),
+                Quota = page.BalanceQuota,
+                RequestCount = page.Records.Count,
+                Message = "API key 有效",
+            };
             return state;
         }
         catch (Exception ex)
@@ -751,7 +783,7 @@ public sealed class SiteSession
     /// <param name="ct">取消令牌。</param>
     /// <returns>拉取汇总。</returns>
     private static async Task<FetchSummary> FetchDirectAsync(
-        NewApiSite site,
+        IDirectSite site,
         FetchOptions options,
         Func<int, UsagePage, PageOutcome> onPage,
         Action<string> progress,
@@ -768,6 +800,8 @@ public sealed class SiteSession
             summary.Pages = 1;
             summary.Total = page.Total;
             summary.Fetched = page.Records.Count;
+            summary.Balance = page.BalanceQuota;
+            summary.Username = site.DescribeAccount(body);
 
             if (page.Records.Count > 0)
             {

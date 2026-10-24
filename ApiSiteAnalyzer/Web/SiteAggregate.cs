@@ -204,7 +204,7 @@ public static class SiteAggregate
     /// <returns>API key（空 = 走浏览器通道）。</returns>
     public static string ApiKeyOf(IApiSite site)
     {
-        return site is NewApiSite direct ? direct.ApiKey : "";
+        return site is IDirectSite direct ? direct.ApiKey : "";
     }
 
     /// <summary>站点通道——有 API key 即 API key 直连（apikey），否则走浏览器登录态（browser）。</summary>

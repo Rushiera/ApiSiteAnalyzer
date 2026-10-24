@@ -148,7 +148,7 @@ public static class Program
             var site = BuildSite(item, profileDir);
 
             // [段2] 有 key 即走 API key 直连通道（特批——仅该站）；没有 key 仍走浏览器通道
-            if (site is NewApiSite direct)
+            if (site is IDirectSite direct)
             {
                 direct.ApiKey = keys.Get(item.Id);
             }
@@ -165,6 +165,11 @@ public static class Program
         if (string.Equals(item.Type, "buddy", StringComparison.OrdinalIgnoreCase))
         {
             return new BuddySite(item.Id, item.DisplayName, item.BaseUrl, profileDir, item.QuotaPerUnit, item.CurrencySymbol);
+        }
+
+        if (string.Equals(item.Type, "sub2api", StringComparison.OrdinalIgnoreCase))
+        {
+            return new Sub2ApiSite(item.Id, item.DisplayName, item.BaseUrl, profileDir, item.QuotaPerUnit, item.CurrencySymbol);
         }
 
         return new NewApiSite(item.Id, item.DisplayName, item.BaseUrl, profileDir, item.QuotaPerUnit, item.CurrencySymbol);

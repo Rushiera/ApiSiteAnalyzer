@@ -22,7 +22,7 @@ public sealed class SiteConfig
     /// <summary>站点键（库内唯一）。</summary>
     public string Id { get; set; } = "";
 
-    /// <summary>适配器类型（`newapi` = New API 系 · `buddy` = 知序空间）。</summary>
+    /// <summary>适配器类型（`newapi` = New API 系 · `buddy` = 知序空间 · `sub2api` = sub2api 网关）。</summary>
     public string Type { get; set; } = "newapi";
 
     /// <summary>显示名。</summary>
@@ -165,7 +165,7 @@ public static class ConfigLoader
 
         if (!IsKnownType(site.Type))
         {
-            throw new ConfigException("站点 " + site.Id + " 的 type 非法（支持 newapi / buddy）：" + site.Type);
+            throw new ConfigException("站点 " + site.Id + " 的 type 非法（支持 newapi / buddy / sub2api）：" + site.Type);
         }
 
         if (site.DisplayName.Length == 0)
@@ -182,7 +182,8 @@ public static class ConfigLoader
     private static bool IsKnownType(string type)
     {
         return string.Equals(type, "newapi", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(type, "buddy", StringComparison.OrdinalIgnoreCase);
+            || string.Equals(type, "buddy", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(type, "sub2api", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>站点键查重。</summary>

@@ -13,7 +13,7 @@ namespace ApiSiteAnalyzer.Sites;
 /// 口径快照：GET /api/data/self（按小时聚合）→ 前端汇总出总数 / 总额度 / 总 token / 平均 RPM·TPM
 /// 分页：p 1 起、page_size 上限 100、排序 logs.id desc（新的在前）
 /// </summary>
-public sealed class NewApiSite : IApiSite
+public sealed class NewApiSite : IDirectSite
 {
     /// <summary>站点键。</summary>
     private readonly string _id;
@@ -483,5 +483,27 @@ public sealed class NewApiSite : IApiSite
     public string BuildUsageUrl()
     {
         return _baseUrl + "/api/log/token";
+    }
+
+    /// <summary>从取数响应里读账户标识——该站记录自带 username 字段（首条即可）。</summary>
+    /// <param name="body">取数接口返回的原始 JSON 文本。</param>
+    /// <returns>用户名；取不到返回空串。</returns>
+    public string DescribeAccount(string body)
+    {
+        try
+        {
+            UsagePage page = ParseUsagePage(body);
+            if (page.Records.Count == 0)
+            {
+                return "";
+            }
+
+            using JsonDocument doc = JsonDocument.Parse(page.Records[0]);
+            return ReadText(doc.RootElement, "username");
+        }
+        catch (Exception)
+        {
+            return "";
+        }
     }
 }

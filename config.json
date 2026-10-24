@@ -13,12 +13,12 @@
     },
     {
       "id": "newapi47",
-      "type": "newapi",
-      "displayName": "New API 47.250.160.225",
-      "baseUrl": "http://47.250.160.225:8443",
+      "type": "sub2api",
+      "displayName": "时长卡 · freeshare",
+      "baseUrl": "https://time.api.freeshare.tech",
       "profileDir": "",
       "quotaPerUnit": 5000000,
-      "currencySymbol": "¤"
+      "currencySymbol": "$"
     },
     {
       "id": "buddy",
