@@ -495,14 +495,16 @@ public sealed class BrowserHub
     /// <param name="instance">受控实例。</param>
     /// <param name="url">目标地址。</param>
     /// <param name="ct">取消令牌。</param>
-    /// <returns>异步任务。</returns>
-    public async Task OpenTabAsync(BrowserInstance instance, string url, CancellationToken ct)
+    /// <returns>新标签页（含页面级调试端点——要往这一页里执行脚本时直接用）。</returns>
+    public async Task<TargetInfo> OpenTabAsync(BrowserInstance instance, string url, CancellationToken ct)
     {
         TargetInfo? target = await CreateTargetAsync(instance.Port, url, ct).ConfigureAwait(false);
         if (target is null)
         {
             throw new InvalidOperationException("受控浏览器未接受新标签页请求（端口 " + instance.Port + "）");
         }
+
+        return target;
     }
 
     /// <summary>持久化登记表（外部改了实例字段后调用）。</summary>

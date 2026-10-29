@@ -84,6 +84,7 @@ public static class ServeRunner
                     channel = SiteAggregate.ChannelOf(site),
                     apiKey = apiKey,
                     loginUrl = site.LoginUrl,
+                    redeemUrl = site.RedeemPath.Length > 0 ? site.BaseUrl + site.RedeemPath : "",
                     profileDir = site.ProfileDir,
                     quotaPerUnit = site.QuotaPerUnit,
                     currencySymbol = site.CurrencySymbol,
@@ -351,6 +352,10 @@ public static class ServeRunner
         {
             string siteId = await ReadFieldAsync(context, "site");
 
+            // [段4-0] 兑换码（可选）——带码时打开站点的兑换页并把码填进输入框（只填不提交）；
+            //        总览路径不带码（码属于某一个账号，批量没有意义）
+            string redeemCode = await ReadFieldAsync(context, "code");
+
             // [段4a] 总览——对**全部站点**依次打开登录页（总览不是站点，动作落在每个站点上）；
             //        直连通道没有浏览器登录这回事、已确认已登录的站点跳过（重复导航会清掉页面上的 token 缓存）
             if (IsAllSites(siteId))
@@ -386,14 +391,15 @@ public static class ServeRunner
 
                     try
                     {
-                        BrowserInstance instance = await queue.RunAsync(() => session.OpenLoginAsync(item, CancellationToken.None)).ConfigureAwait(false);
+                        (BrowserInstance instance, string note) = await queue.RunAsync(() =>
+                            session.OpenLoginAsync(item, "", CancellationToken.None)).ConfigureAwait(false);
                         openedCount = openedCount + 1;
                         results.Add(new
                         {
                             id = item.Id,
                             displayName = item.DisplayName,
                             opened = true,
-                            message = "已打开登录页（端口 " + instance.Port + "）",
+                            message = "已打开登录页（端口 " + instance.Port + "）" + (note.Length > 0 ? "：" + note : ""),
                         });
                     }
                     catch (Exception ex)
@@ -426,14 +432,17 @@ public static class ServeRunner
 
             try
             {
-                BrowserInstance instance = await queue.RunAsync(() =>
-                    session.OpenLoginAsync(site, CancellationToken.None)).ConfigureAwait(false);
+                (BrowserInstance instance, string note) = await queue.RunAsync(() =>
+                    session.OpenLoginAsync(site, redeemCode, CancellationToken.None)).ConfigureAwait(false);
 
                 return Results.Json(new
                 {
                     ok = true,
                     port = instance.Port,
-                    message = "已打开浏览器窗口并切到登录页——登录完成后回到面板点「检查登录」",
+                    redeemNote = note,
+                    message = note.Length > 0
+                        ? "已打开浏览器窗口并切到兑换页——" + note
+                        : "已打开浏览器窗口并切到登录页——登录完成后回到面板点「检查登录」",
                 });
             }
             catch (Exception ex)

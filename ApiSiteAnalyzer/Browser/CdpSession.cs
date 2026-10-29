@@ -168,6 +168,13 @@ public sealed class CdpSession : IAsyncDisposable
     {
         return SendAsync("Page.enable", null, ct);
     }
+    /// <summary>把本标签页带到前台——登录 / 兑换页要用户看得见（否则页面开在后台标签页里，等于没打开）。</summary>
+    /// <param name="ct">取消令牌。</param>
+    /// <returns>异步任务。</returns>
+    public Task BringToFrontAsync(CancellationToken ct)
+    {
+        return SendAsync("Page.bringToFront", null, ct);
+    }
 
     /// <summary>在页面内求值并取回字符串结果。</summary>
     /// <param name="expression">JS 表达式（建议自带 JSON.stringify）。</param>

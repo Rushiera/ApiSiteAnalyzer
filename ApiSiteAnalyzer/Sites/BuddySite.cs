@@ -98,6 +98,14 @@ public sealed class BuddySite : IApiSite
     /// 站点前端的展示公式（`round(元×1000)/4`）只是它的等价形态，不作为取数依据——见 `PointsPerYuan`。
     /// </summary>
     public double BalanceScale => _quotaPerUnit / PointsPerYuan;
+    /// <summary>
+    /// 兑换页路径——本站充值走兑换码：**已登录**用户的兑换页是 `/refuel`（输入框 `input.mono`，占位「粘贴兑换码」）；
+    /// `/activate` 是未登录面的兑换入口，已登录访问会被重定向回用量页，故这里取 `/refuel`。
+    /// </summary>
+    public string RedeemPath
+    {
+        get { return "/refuel"; }
+    }
 
     /// <summary>
     /// 登录态探针——在页面上下文内取 localStorage 的 JWT，读账户信息，并取**累计消耗积分**作为余额位。

@@ -295,6 +295,13 @@
     <span class="kbn" id="keyHint"></span>
   </div>
 
+  <!-- 兑换码条（仅站点自报 RedeemPath 的站显示）：点「去登录」时打开兑换页并把码自动填入（只填不提交） -->
+  <div class="keybar" id="redeembar" style="display:none">
+    <span class="kblabel">兑换码</span>
+    <input type="text" id="redeemInput" spellcheck="false" autocomplete="off" placeholder="粘贴兑换码（一次性，兑完作废）" />
+    <span class="kbn" id="redeemHint">粘贴后点「去登录」——会打开兑换页并自动填入，兑换按钮留给你核对着按</span>
+  </div>
+
   <div class="mask" id="mask">
     <div class="dialog">
       <h3>采集设置</h3>
@@ -533,6 +540,7 @@ async function loadSites(keep){
   sel.onchange = () => { currentSite = sel.value; switchSite(); };
   applyMode();
   renderKeyBar();
+  renderRedeemBar();
   renderBalance(null);
   renderOfficial();
 }
@@ -602,6 +610,17 @@ function renderKeyBar(){
   $('apiKeyInput').value = s.apiKey || '';
   $('keyHint').className = 'kbn';
   $('keyHint').textContent = '该站无账号密码——全部功能仅认这一个 key；明文存本地 data/keys.json（不入仓）';
+}
+
+/* 兑换码条（仅自报兑换页的站点显示）——码只随本次请求发送，服务端不落盘；
+   切站不清空输入框（先粘码再切回来的场景），总览下隐藏（码属于某一个账号，批量没意义） */
+function renderRedeemBar(){
+  const s = siteMap[currentSite];
+  const bar = $('redeembar');
+  if(!s || !s.redeemUrl || isAll()){ bar.style.display = 'none'; return; }
+  bar.style.display = 'flex';
+  $('redeemHint').className = 'kbn';
+  $('redeemHint').textContent = '粘贴后点「去登录」——会打开兑换页并自动填入，兑换按钮留给你核对着按';
 }
 
 async function saveKey(){
@@ -1099,10 +1118,13 @@ async function checkLogin(){
 async function openLogin(){
   if(!currentSite) return;
   const all = isAll();
-  setStatus(all ? '正在为全部站点打开登录页…' : '正在打开浏览器…');
+  const cur = siteMap[currentSite];
+  /* 兑换码只在单站且该站有兑换页时带——总览 / 无兑换页的站点一律空串（服务端按空串走登录页） */
+  const code = (!all && cur && cur.redeemUrl) ? ($('redeemInput').value || '').trim() : '';
+  setStatus(all ? '正在为全部站点打开登录页…' : (code ? '正在打开兑换页并填入兑换码…' : '正在打开浏览器…'));
   const r = await fetch('/api/open-login', {
     method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({site: currentSite})
+    body: JSON.stringify({site: currentSite, code: code})
   }).then(x=>x.json());
   if(!r.ok){ setStatus('打开失败：' + (r.error||''), 'bad'); return; }
   /* 总览——逐站回执（打开的 / 跳过的 / 失败的）一行说完，不逐站开弹窗 */
@@ -1111,7 +1133,11 @@ async function openLogin(){
     setStatus('全部站点：打开 ' + r.opened + ' 个登录页　' + parts.join('　') + '（登录完成后点「检查登录」）', r.opened > 0 ? 'ok' : '');
     return;
   }
-  setStatus(r.message + '（登录完成后点「检查登录」）', 'ok');
+  /* 码填成功即清空输入框——一次性凭据不在页面上多留一份；填失败则留着，方便原样重试 */
+  if(r.redeemNote && r.redeemNote.indexOf('已把兑换码填进') === 0){
+    $('redeemInput').value = '';
+  }
+  setStatus(r.message + (r.redeemNote ? '' : '（登录完成后点「检查登录」）'), 'ok');
 }
 
 async function startFetch(full){

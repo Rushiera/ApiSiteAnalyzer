@@ -401,15 +401,15 @@ public sealed class SiteSession
     }
 
     /// <summary>
-    /// 打开登录页——**在通道标签页里导航**（钩子已就位，登录响应里的 access_token 会被页面内钩子捕获并留在页面里）。
+    /// 打开登录页 / 兑换页——**在前台可见标签页里打开**（此前是在通道标签页里导航：用户看到的还是启动页，等于「没打开」）。
     /// **强制可见窗口**：静默模式下受控实例是 headless，这里换成窗口实例（停旧起新）——登录归人，人得看得见。
-    /// 登录完点「检查登录」：登录窗口保活开着时**窗口留着**（会话就在这个窗口里），
-    /// 关掉保活才按旧行为切回静默。
+    /// 带兑换码时打开站点的兑换页并把码填进输入框（**只填不提交**：码一次性，核对后由人按「兑换」）。
     /// </summary>
     /// <param name="site">站点适配器。</param>
+    /// <param name="redeemCode">兑换码（空 = 只开登录页）。</param>
     /// <param name="ct">取消令牌。</param>
-    /// <returns>受控实例（供面板回显端口）。</returns>
-    public async Task<BrowserInstance> OpenLoginAsync(IApiSite site, CancellationToken ct)
+    /// <returns>受控实例（供面板回显端口）+ 兑换码填写结果（空 = 未走兑换路径）。</returns>
+    public async Task<(BrowserInstance Instance, string RedeemNote)> OpenLoginAsync(IApiSite site, string redeemCode, CancellationToken ct)
     {
         // [段0] API key 直连站点（特批）——没有浏览器登录这回事，出声拒绝（不静默什么都不做）
         if (site is IDirectSite direct && direct.ApiKey.Length > 0)
@@ -417,16 +417,132 @@ public sealed class SiteSession
             throw new InvalidOperationException("该站点走 API key 直连通道，不需要浏览器登录");
         }
 
+        // [段0b] 带码且该站自报兑换页 → 目标是兑换页；否则按登录页
+        string code = redeemCode.Trim();
+        bool redeem = code.Length > 0 && site.RedeemPath.Length > 0;
+        string targetUrl = redeem ? site.BaseUrl + site.RedeemPath : site.LoginUrl;
+
+        // [段1] 起可见窗口（登录归人，人得看得见）
         (BrowserInstance instance, _) = await _hub.EnsureWindowAsync(site.ProfileDir, site.BaseUrl, ct).ConfigureAwait(false);
 
-        CdpSession session = await OpenSessionAsync(site, ct).ConfigureAwait(false);
-        await using (session)
+        // [段2] 前台标签页——先开空白页，注入钩子 + 导航 + 置前后才装 prep：
+        //        钩子必须在导航之前注入（文档创建时执行），否则登录响应里的 token 捕不到
+        TargetInfo tab = await _hub.OpenTabAsync(instance, "about:blank", ct).ConfigureAwait(false);
+        await using CdpSession session = await CdpSession.ConnectAsync(tab.SocketUrl, 20000, ct).ConfigureAwait(false);
+        await session.EnablePageAsync(ct).ConfigureAwait(false);
+
+        string hook = site.BuildHookScript();
+        if (hook.Length > 0)
         {
-            await session.NavigateAsync(site.LoginUrl, ct).ConfigureAwait(false);
-            await Task.Delay(NavigateSettleMs, ct).ConfigureAwait(false);
+            await session.AddInitScriptAsync(hook, ct).ConfigureAwait(false);
+            instance.MarkHook(site.Id);
+            _hub.Persist();
         }
 
-        return instance;
+        await session.NavigateAsync(targetUrl, ct).ConfigureAwait(false);
+        await Task.Delay(NavigateSettleMs, ct).ConfigureAwait(false);
+
+        // [段2b] 把这一页推到前台——不置前的话它可能是后台标签页，用户看不见
+        try
+        {
+            await session.BringToFrontAsync(ct).ConfigureAwait(false);
+        }
+        catch (InvalidOperationException)
+        {
+            // 置前失败不影响页面已打开——窗口本身已经在最前面
+        }
+
+        string prep = site.BuildSessionPrepScript();
+        if (prep.Length > 0)
+        {
+            await session.EvaluateAsync(prep, false, ct).ConfigureAwait(false);
+        }
+
+        // [段3] 兑换码——只填不提交
+        string note = "";
+        if (redeem)
+        {
+            note = await FillRedeemAsync(session, code, targetUrl, ct).ConfigureAwait(false);
+        }
+
+        return (instance, note);
+    }
+
+    /// <summary>
+    /// 把兑换码填进当前页面的输入框——**只填不提交**。SPA 渲染有延迟，轮询等输入框出现；
+    /// 拿不到就如实回报（不谎称已填——静默失败会让用户以为码填好了，点「兑换」时才发现空）。
+    /// </summary>
+    /// <param name="session">兑换页所在标签页的会话。</param>
+    /// <param name="code">兑换码。</param>
+    /// <param name="expectedUrl">期望停留的兑换页地址（被重定向即说明没登录，如实说）。</param>
+    /// <param name="ct">取消令牌。</param>
+    /// <returns>给用户看的结果说明。</returns>
+    private static async Task<string> FillRedeemAsync(CdpSession session, string code, string expectedUrl, CancellationToken ct)
+    {
+        string script = BuildFillScript(code);
+        for (int attempt = 0; attempt < 30; attempt++)
+        {
+            string result;
+            try
+            {
+                result = await session.EvaluateAsync(script, false, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                return "兑换页已打开，但自动填入失败：" + ex.Message;
+            }
+
+            if (result == "filled")
+            {
+                return "已把兑换码填进兑换页输入框（未提交——核对无误后点页面上的「兑换」）";
+            }
+
+            if (result != "nofield")
+            {
+                return "兑换页已打开，自动填入未成功：" + result;
+            }
+
+            await Task.Delay(500, ct).ConfigureAwait(false);
+        }
+
+        // [段1] 等满仍没有输入框——区分「页面慢」与「被重定向走（多半未登录）」，两种情况给的下一步不同
+        string current = "";
+        try
+        {
+            current = await session.EvaluateAsync("String(location.href)", false, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            return "兑换页已打开，但读不回页面地址：" + ex.Message;
+        }
+
+        if (current.Length > 0 && !current.StartsWith(expectedUrl, StringComparison.OrdinalIgnoreCase))
+        {
+            return "兑换页被重定向到 " + current + "（多半是还没登录）——先在窗口里登录，登录后再点一次「去登录」填码";
+        }
+
+        return "兑换页已打开，但没等到兑换码输入框（页面还在加载）——请手动粘贴";
+    }
+
+    /// <summary>
+    /// 构造「把码写进兑换输入框」的页面脚本——走原生 value setter + input / change 事件：
+    /// Vue 3 / React 的双向绑定只认事件，直接赋 el.value 不会更新组件状态（填了也等于没填）。
+    /// </summary>
+    /// <param name="code">兑换码（经 JSON 序列化成 JS 字符串字面量——码里的引号 / 反斜杠不会破坏脚本）。</param>
+    /// <returns>页面脚本源码。</returns>
+    private static string BuildFillScript(string code)
+    {
+        string literal = JsonSerializer.Serialize(code);
+        return "(function(){" +
+               "var v=" + literal + ";" +
+               "var el=document.querySelector('input.mono')||document.querySelector('input:not([type=hidden])');" +
+               "if(!el){return 'nofield';}" +
+               "var set=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;" +
+               "el.focus();set.call(el,v);" +
+               "el.dispatchEvent(new Event('input',{bubbles:true}));" +
+               "el.dispatchEvent(new Event('change',{bubbles:true}));" +
+               "return el.value===v?'filled':'mismatch';" +
+               "})()";
     }
 
     /// <summary>
