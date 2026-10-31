@@ -97,7 +97,7 @@ ApiSiteAnalyzer_A.exe probe            # 侦察（新站点接入用）：原始
 
 **运行中的 exe 锁着自己的文件**——直接覆盖会失败。故产物分 A / B 两槽轮换：
 
-1. 发布到**仓库外的暂存区**（`ApiSiteAnalyzer.csproj` 的 `PublishDir` 已指向 `..\..\CatTemp\asa-publish\`）：
+1. 发布到**仓库外的暂存区**（`ApiSiteAnalyzer.csproj` 的 `PublishDir` 已指向 `..\..\tools\CatTemp\asa-publish\`，即 `Workspace:tools/CatTemp/asa-publish`）：
 
 ```
 dotnet publish ApiSiteAnalyzer\ApiSiteAnalyzer.csproj -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
@@ -106,8 +106,8 @@ dotnet publish ApiSiteAnalyzer\ApiSiteAnalyzer.csproj -c Release -r win-x64 --se
 2. 把产物移进**空闲槽**（正在跑的那一槽不动）：
 
 ```
-file-delete ApiSiteAnalyzer_B.exe     # 先软删旧槽 → CatTemp/fs_recycle（可恢复）
-file-move   CatTemp/asa-publish/ApiSiteAnalyzer.exe → ApiSiteAnalyzer_B.exe
+file-delete ApiSiteAnalyzer_B.exe     # 先软删旧槽 → tools/CatTemp/fs_recycle（可恢复）
+file-move   tools/CatTemp/asa-publish/ApiSiteAnalyzer.exe → ApiSiteAnalyzer_B.exe
 ```
 
 > 工具面实录（2026-10-01）：`Move-Item` 被 `PS_WRITE_FORBIDDEN` 拦截（powershell 不做文件写）；`file-move` 遇已存在目标拒绝——故走「先软删、再移动」两步，回收站里留旧槽可回溯。
