@@ -98,6 +98,8 @@ public sealed class BuddySite : IApiSite
     /// 站点前端的展示公式（`round(元×1000)/4`）只是它的等价形态，不作为取数依据——见 `PointsPerYuan`。
     /// </summary>
     public double BalanceScale => _quotaPerUnit / PointsPerYuan;
+    /// <summary>余额位取本地台账累计——已用积分 = 累计消耗积分（两账号合并 + 后续自累加；探针的窗口值不作数）。</summary>
+    public bool BalanceFromLedger => true;
     /// <summary>
     /// 兑换页路径——本站充值走兑换码：**已登录**用户的兑换页是 `/refuel`（输入框 `input.mono`，占位「粘贴兑换码」）；
     /// `/activate` 是未登录面的兑换入口，已登录访问会被重定向回用量页，故这里取 `/refuel`。

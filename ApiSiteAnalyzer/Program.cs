@@ -174,6 +174,21 @@ public static class Program
 
         return new NewApiSite(item.Id, item.DisplayName, item.BaseUrl, profileDir, item.QuotaPerUnit, item.CurrencySymbol);
     }
+    /// <summary>余额位取值——台账口径的站点（BalanceFromLedger，如知序空间「已用积分」）取本地累计消费，其余取探针值。</summary>
+    /// <param name="site">站点适配器。</param>
+    /// <param name="dataDir">数据目录（库所在）。</param>
+    /// <param name="probeQuota">探针报回的余额位（quota 单位）。</param>
+    /// <returns>应展示的余额位（quota 单位）。</returns>
+    private static long BalanceQuota(IApiSite site, string dataDir, long probeQuota)
+    {
+        if (!site.BalanceFromLedger)
+        {
+            return probeQuota;
+        }
+
+        using var db = new Db(Path.Combine(dataDir, "usage.db"));
+        return db.SumQuota(site.Id);
+    }
 
     /// <summary>探测各站登录态。</summary>
     private static async Task<int> RunCheckAsync(List<IApiSite> sites, string chromePath, string dataDir, CancellationToken ct)
@@ -194,11 +209,11 @@ public static class Program
                 if (site.BalanceUnit.Length > 0)
                 {
                     double scale = site.BalanceScale > 0 ? site.BalanceScale : 1;
-                    balanceText = (state.Quota / scale).ToString("0.##") + " " + site.BalanceUnit;
+                    balanceText = (BalanceQuota(site, dataDir, state.Quota) / scale).ToString("0.##") + " " + site.BalanceUnit;
                 }
                 else
                 {
-                    balanceText = (state.Quota / site.QuotaPerUnit).ToString("0.00000000") + " " + site.CurrencySymbol;
+                    balanceText = (BalanceQuota(site, dataDir, state.Quota) / site.QuotaPerUnit).ToString("0.00000000") + " " + site.CurrencySymbol;
                 }
 
                 Console.WriteLine("[已登录] " + site.DisplayName + " · 用户 " + state.Username +
@@ -265,12 +280,13 @@ public static class Program
             if (site.BalanceUnit.Length > 0)
             {
                 double scale = site.BalanceScale > 0 ? site.BalanceScale : 1;
-                Console.WriteLine("  " + site.BalanceLabel + "：" + (summary.Balance / scale).ToString("0.##") + " " + site.BalanceUnit);
+                Console.WriteLine("  " + site.BalanceLabel + "：" + (BalanceQuota(site, dataDir, summary.Balance) / scale).ToString("0.##") + " " + site.BalanceUnit);
             }
             else
             {
-                Console.WriteLine("  " + site.BalanceLabel + "：" + summary.Balance + " quota = " +
-                    (summary.Balance / site.QuotaPerUnit).ToString("0.0000") + " " + site.CurrencySymbol);
+                long shownQuota = BalanceQuota(site, dataDir, summary.Balance);
+                Console.WriteLine("  " + site.BalanceLabel + "：" + shownQuota + " quota = " +
+                    (shownQuota / site.QuotaPerUnit).ToString("0.0000") + " " + site.CurrencySymbol);
             }
 
             if (summary.Snapshot is not null)

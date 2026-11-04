@@ -527,6 +527,17 @@ ON CONFLICT (site_id) DO UPDATE SET last_fetch_at=excluded.last_fetch_at, total_
         object? value = cmd.ExecuteScalar();
         return value is null || value is DBNull ? 0 : Convert.ToInt64(value);
     }
+    /// <summary>读某站点台账累计消费额度（type = 2 = 消费）——「已用积分」这类累计消耗口径的余额位取数用。</summary>
+    /// <param name="siteId">站点键。</param>
+    /// <returns>消费额度合计（quota 单位；无记录返回 0）。</returns>
+    public long SumQuota(string siteId)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT COALESCE(SUM(quota), 0) FROM usage_log WHERE site_id=$site AND type=2;";
+        cmd.Parameters.AddWithValue("$site", siteId);
+        object? value = cmd.ExecuteScalar();
+        return value is null || value is DBNull ? 0 : Convert.ToInt64(value);
+    }
 
     /// <summary>
     /// 读库内最新一条记录的提交时刻（跨站点取最大值）——「工作状态」判定的基准。

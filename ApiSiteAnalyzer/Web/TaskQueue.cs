@@ -80,7 +80,7 @@ public sealed class PanelState
     private string _site = "";
     /// <summary>当前站点键（余额按站点分开记，总览视图要逐站取）。</summary>
     private string _siteId = "";
-    /// <summary>各站点最近一次探到的真实余额（quota 单位；键 = 站点键，0 = 未取到）。</summary>
+    /// <summary>各站点余额位现值（quota 单位；键 = 站点键，0 = 未取到）——默认记探针值；台账口径的站点（BalanceFromLedger）记本地累计消费。</summary>
     private readonly Dictionary<string, long> _balances = new Dictionary<string, long>(StringComparer.Ordinal);
 
     /// <summary>各站点最近一次探到的登录态（键 = 站点键）——总览站点块据此显示「已登录 / 未登录 / 未探测」。</summary>
@@ -108,14 +108,18 @@ public sealed class PanelState
     private readonly Dictionary<string, AutoState> _autoStates = new Dictionary<string, AutoState>(StringComparer.Ordinal);
     /// <summary>工作状态快照（最近提交时刻 → 工作中 / 疑似停工 / 已停工；null = 尚未判定）。</summary>
     private WorkSnapshot? _work;
+    /// <summary>站点清单（余额位取值口径判定用——台账口径的站点取本地累计）。</summary>
+    private readonly List<Sites.IApiSite> _sites;
+    /// <summary>库路径（台账口径余额取数用）。</summary>
+    private readonly string _dbPath;
 
     /// <summary>构造。</summary>
     /// <param name="sites">站点清单（保留）。</param>
     /// <param name="dbPath">库路径（保留）。</param>
     public PanelState(List<Sites.IApiSite> sites, string dbPath)
     {
-        _ = sites;
-        _ = dbPath;
+        _sites = sites;
+        _dbPath = dbPath;
     }
 
     /// <summary>是否有采集在跑。</summary>
@@ -255,9 +259,22 @@ public sealed class PanelState
     /// <param name="balance">余额（quota 单位；0 = 未取到）。</param>
     public void SetBalance(string siteId, long balance)
     {
+        // 余额位取值口径：台账口径的站点（BalanceFromLedger，如知序空间「已用积分」）取本地累计消费——
+        // 探针值受站点统计窗口影响不作数；台账口径天然累加（多账号合并 + 后续新增）。
+        long value = balance;
+        foreach (Sites.IApiSite site in _sites)
+        {
+            if (string.Equals(site.Id, siteId, StringComparison.Ordinal) && site.BalanceFromLedger)
+            {
+                using var db = new Store.Db(_dbPath);
+                value = db.SumQuota(siteId);
+                break;
+            }
+        }
+
         lock (_gate)
         {
-            _balances[siteId] = balance;
+            _balances[siteId] = value;
         }
     }
     /// <summary>取某站点最近一次探到的真实余额（0 = 未取到）。</summary>

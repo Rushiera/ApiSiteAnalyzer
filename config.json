@@ -5,7 +5,7 @@
     {
       "id": "xyjun",
       "type": "newapi",
-      "displayName": "贤鱼 API",
+      "displayName": "xyjun",
       "baseUrl": "https://api.xyjun.fun",
       "profileDir": "",
       "quotaPerUnit": 500000,
@@ -14,25 +14,16 @@
     {
       "id": "newapi47",
       "type": "sub2api",
-      "displayName": "时长卡 · freeshare",
+      "displayName": "freeshare",
       "baseUrl": "https://time.api.freeshare.tech",
       "profileDir": "",
       "quotaPerUnit": 5000000,
       "currencySymbol": "$"
     },
     {
-      "id": "buddy",
-      "type": "buddy",
-      "displayName": "知序空间",
-      "baseUrl": "https://buddy.mewbius.com",
-      "profileDir": "",
-      "quotaPerUnit": 1000000,
-      "currencySymbol": "¥"
-    },
-    {
       "id": "buddy2",
       "type": "buddy",
-      "displayName": "知序空间2",
+      "displayName": "知序空间",
       "baseUrl": "https://buddy.mewbius.com",
       "profileDir": "",
       "quotaPerUnit": 1000000,

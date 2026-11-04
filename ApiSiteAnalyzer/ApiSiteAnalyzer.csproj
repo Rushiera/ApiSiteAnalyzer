@@ -12,7 +12,7 @@
          运行中的 exe 锁文件，直接发布到槽位会失败（KKManager 判例）
          暂存区在 workspace:tools/CatTemp（2026-10-25 目录下沉后的位置） -->
     <PublishDir>..\..\tools\CatTemp\asa-publish\</PublishDir>
-    <Version>0.22.2</Version>
+    <Version>0.23.0</Version>
   </PropertyGroup>
 
   <ItemGroup>

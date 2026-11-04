@@ -145,7 +145,7 @@ public sealed class Sub2ApiSite : IDirectSite
         return _baseUrl + "/api/overview?key=" + Uri.EscapeDataString(ApiKey);
     }
 
-    /// <summary>从取数响应里读账户标识（令牌名 + key 尾号）。</summary>
+    /// <summary>从取数响应里读账户标识（key 尾号）——令牌名（卡名，如「1级日卡v1」）不进登录态（Rushiera 口径 2026-11-04）。</summary>
     /// <param name="body">取数接口返回的原始 JSON 文本。</param>
     /// <returns>账户标识；解析失败返回空串。</returns>
     public string DescribeAccount(string body)
@@ -164,14 +164,8 @@ public sealed class Sub2ApiSite : IDirectSite
                 return "";
             }
 
-            string name = ReadText(key, "key_name");
-            string tail = ReadText(key, "key_tail");
-            if (name.Length > 0 && tail.Length > 0)
-            {
-                return name + "（" + tail + "）";
-            }
-
-            return name.Length > 0 ? name : tail;
+            // 登录态只报 key 尾号——令牌名（卡名，如「1级日卡v1」）不进登录态（Rushiera 口径 2026-11-04）
+            return ReadText(key, "key_tail");
         }
         catch (JsonException)
         {

@@ -52,7 +52,9 @@
   .official .cell .v{font-size:17px;font-weight:600;font-variant-numeric:tabular-nums;word-break:break-all}
   .official .stamp{color:var(--dim);font-size:11px;margin-top:8px}
 
-  .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;margin:16px 0}
+  .cards{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:10px;margin:16px 0}
+  /* 14 卡恒 7 列 × 2 排（Rushiera 口径 2026-11-04）——固定列数让「一排 7 个」不随窗口宽度摆动；窄屏回落自动填充防挤坏 */
+  @media (max-width:900px){.cards{grid-template-columns:repeat(auto-fill,minmax(160px,1fr))}}
   .card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:11px 13px}
   .card .k{color:var(--dim);font-size:12px}
   .card .v{font-size:19px;font-weight:600;margin-top:3px;word-break:break-all}
