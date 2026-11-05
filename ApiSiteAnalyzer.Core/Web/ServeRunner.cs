@@ -400,14 +400,17 @@ public static class ServeRunner
                 int openedCount = 0;
                 foreach (IApiSite item in sites)
                 {
-                    if (SiteAggregate.ChannelOf(item) == "apikey")
+                    string channel = SiteAggregate.ChannelOf(item);
+                    if (SiteAggregate.IsDirectChannel(channel))
                     {
                         results.Add(new
                         {
                             id = item.Id,
                             displayName = item.DisplayName,
                             opened = false,
-                            message = "走 API key 直连通道，不需要浏览器登录",
+                            message = channel == "local"
+                                ? "走本机直连通道，不需要浏览器登录"
+                                : "走 API key 直连通道，不需要浏览器登录",
                         });
                         continue;
                     }

@@ -12,7 +12,7 @@
     <!-- 类库默认不把 NuGet 依赖复制到输出——但核心是**独立加载单元**（影子副本要自带 Sqlite 全家），
          故显式要求复制，否则 bin/Debug 下只有 Core.dll，新 ALC 里解析不到 Microsoft.Data.Sqlite -->
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
-    <Version>0.26.3</Version>
+    <Version>0.26.4</Version>
     <PublishDir>..\..\tools\CatTemp\asa-publish-core\</PublishDir>
   </PropertyGroup>
 

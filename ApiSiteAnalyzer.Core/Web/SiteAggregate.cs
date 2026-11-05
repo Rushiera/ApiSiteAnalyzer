@@ -207,12 +207,25 @@ public static class SiteAggregate
         return site is IDirectSite direct ? direct.ApiKey : "";
     }
 
-    /// <summary>站点通道——有 API key 即 API key 直连（apikey），否则走浏览器登录态（browser）。</summary>
+    /// <summary>站点通道——本机常驻服务恒直连（local）· 有 API key 即 API key 直连（apikey）· 否则走浏览器登录态（browser）。</summary>
     /// <param name="site">站点适配器。</param>
     /// <returns>通道标签。</returns>
     public static string ChannelOf(IApiSite site)
     {
+        // 本机常驻服务（work 壳的 serve）没有登录面、也没有凭据——通道标签独立一档，不进浏览器
+        if (site is IDirectSite local && local.AlwaysDirect)
+        {
+            return "local";
+        }
+
         return ApiKeyOf(site).Length > 0 ? "apikey" : "browser";
+    }
+    /// <summary>是否直连类通道（本机直连 / API key 直连）——两类都不启浏览器、也没有登录面。</summary>
+    /// <param name="channel">通道标签（<see cref="ChannelOf"/> 的返回值）。</param>
+    /// <returns>true = 直连类。</returns>
+    public static bool IsDirectChannel(string channel)
+    {
+        return channel == "apikey" || channel == "local";
     }
 
     /// <summary>合并全部站点的分析结果。</summary>

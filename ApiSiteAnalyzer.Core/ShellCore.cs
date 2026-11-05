@@ -33,6 +33,12 @@ namespace ApiSiteAnalyzer
         /// <summary>数据目录（config 同级 data）。</summary>
         private string _dataDir = "";
 
+        /// <summary>配置目录（config.json 所在目录——serve 自举据此定位 apis/）。</summary>
+        private string _configDir = "";
+
+        /// <summary>serve 自举结论（启动时写入；进核心快照，失败在快照里一眼可见）。</summary>
+        private string _serveNote = "";
+
         /// <summary>程序目录（宿主传入）。</summary>
         private string _baseDir = "";
 
@@ -83,6 +89,7 @@ namespace ApiSiteAnalyzer
 
             string configDir = Path.GetDirectoryName(Path.GetFullPath(resolved)) ?? ".";
             _dataDir = Path.Combine(configDir, "data");
+            _configDir = configDir;
             Directory.CreateDirectory(_dataDir);
 
             _sites = CliCommands.BuildSites(config, _dataDir);
@@ -119,6 +126,18 @@ namespace ApiSiteAnalyzer
                 Path.Combine(runDir, "service.token"));
             app.Start();
             _app = app;
+
+            // [段1b] 本机 serve 自举——只起 apis 一个进程即全开（中转站 iframe 与第四站取数都挂在 18100）。
+            //        已在跑则不动；拉起失败只出声，不影响面板本身启动。
+            try
+            {
+                _serveNote = ServeLauncher.EnsureUp(_sites, _configDir, runDir);
+            }
+            catch (Exception ex)
+            {
+                _serveNote = "serve 自举异常：" + ex.GetType().Name + ": " + ex.Message;
+                Console.Error.WriteLine(_serveNote);
+            }
         }
 
         /// <summary>停止服务（幂等）——取消后台任务 + 优雅停 Kestrel。</summary>
@@ -176,6 +195,7 @@ namespace ApiSiteAnalyzer
                 port = _config == null ? 0 : _config.Port,
                 sites = _sites.Count,
                 dataDir = _dataDir,
+                serve = _serveNote,
                 running,
                 startedAt = _startedAt == default ? "" : _startedAt.ToString("yyyy-MM-dd HH:mm:ss"),
                 uptimeSeconds = uptime,

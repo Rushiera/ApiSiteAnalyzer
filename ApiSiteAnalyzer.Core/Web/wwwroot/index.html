@@ -571,9 +571,11 @@ function renderOfficial(){
     return;
   }
   if(!s || !s.snapshot){
-    const direct = !!(s && s.channel === 'apikey');
+    const ch = s ? s.channel : '';
+    const direct = ch === 'apikey' || ch === 'local';
+    const directWhy = ch === 'local' ? '该站无口径接口（本机直连只能读台账）' : '该站无口径接口（API key 只能查用量日志）';
     el.innerHTML = '<div class="cell"><div class="k">—</div><div class="v muted">' +
-      (direct ? '该站无口径接口（API key 只能查用量日志）' : '未取到（点「拉取数据」会顺带拉一次）') + '</div></div>';
+      (direct ? directWhy : '未取到（点「拉取数据」会顺带拉一次）') + '</div></div>';
     $('officialStamp').textContent = '';
     return;
   }
@@ -1028,7 +1030,8 @@ function renderSiteBlocks(sites){
     return;
   }
   el.innerHTML = sites.map(s => {
-    const direct = s.channel === 'apikey';
+    const ch = s.channel;
+    const channelText = ch === 'local' ? '本机直连' : (ch === 'apikey' ? 'API key 直连' : '浏览器');
     /* 余额格：主值 + 副行小字——直连站无余额接口按「不设限」展示，浏览器站没探过就如实说未探测；
        自报单位的站点（如知序空间「已用积分」）按它自己的名称与单位显示 */
     let bal, sub;
@@ -1071,17 +1074,17 @@ function renderSiteBlocks(sites){
     let loginText = '未探测', loginFlag = '';
     if(lg){
       if(lg.loggedIn){
-        loginText = (direct ? 'key 有效' : '已登录') + (lg.username ? '（' + lg.username + '）' : '') +
+        loginText = (ch === 'apikey' ? 'key 有效' : (ch === 'local' ? '可用' : '已登录')) + (lg.username ? '（' + lg.username + '）' : '') +
           (lg.checkedAt ? ' · ' + lg.checkedAt.substring(11, 19) : '');
       }else{
-        loginText = (direct ? 'key 无效' : '未登录') + (lg.checkedAt ? ' · ' + lg.checkedAt.substring(11, 19) : '');
-        loginFlag = '<span class="tag bad" title="' + esc(lg.message || '') + '">' + (direct ? 'key 无效' : '未登录') + '</span>';
+        loginText = (ch === 'apikey' ? 'key 无效' : (ch === 'local' ? '不可用' : '未登录')) + (lg.checkedAt ? ' · ' + lg.checkedAt.substring(11, 19) : '');
+        loginFlag = '<span class="tag bad" title="' + esc(lg.message || '') + '">' + (ch === 'apikey' ? 'key 无效' : (ch === 'local' ? '不可用' : '未登录')) + '</span>';
       }
     }
     /* 一站一行——列序与表头一致：站点 / 通道 / 真实余额 / 登录态 / 下次采集 / 本地记录 / 本地消费 / 库内行数 / 上次拉取 / 自动采集 */
     return '<tr>' +
       '<td><span class="name">' + esc(s.displayName) + '</span></td>' +
-      '<td><span class="tag">' + (direct ? 'API key 直连' : '浏览器') + '</span></td>' +
+      '<td><span class="tag">' + channelText + '</span></td>' +
       '<td>' + bal + '<div class="sub">' + esc(sub) + '</div></td>' +
       '<td>' + esc(loginText) + (loginFlag ? ' ' + loginFlag : '') + '</td>' +
       '<td class="num">' + esc(a && a.nextAt ? a.nextAt.substring(11, 19) : '—') + '</td>' +
@@ -1107,23 +1110,29 @@ async function checkLogin(){
   /* 总览——逐站结论汇总到状态条；每站明细在站点表「登录态」列（服务端按站点缓存，3 秒内刷新） */
   if(r.all){
     const parts = (r.sites||[]).map(s => s.displayName + '：' +
-      (s.loggedIn ? (s.channel === 'apikey' ? 'key 有效' : '已登录') : (s.channel === 'apikey' ? 'key 无效' : '未登录')));
+      (s.channel === 'apikey' ? (s.loggedIn ? 'key 有效' : 'key 无效')
+        : (s.channel === 'local' ? (s.loggedIn ? '可用' : '不可用') : (s.loggedIn ? '已登录' : '未登录'))));
     const bad = (r.sites||[]).filter(s => !s.loggedIn).length;
     setStatus('全部站点 ' + r.loggedInCount + '/' + r.total + ' 可用　' + parts.join('　'), bad ? 'bad' : 'ok');
     return;
   }
   const s = siteMap[currentSite];
-  const direct = !!(s && s.channel === 'apikey');
+  const ch = s ? s.channel : '';
+  const direct = ch === 'apikey' || ch === 'local';
   if(r.loggedIn){
     renderBalance(r.quota);
-    setStatus(direct
-      ? 'API key 有效 · 账号 ' + r.username + ' · 本次可见 ' + fmtNum(r.requestCount) + ' 条记录'
-      : '已登录 · 用户 ' + r.username + ' · 请求数 ' + fmtNum(r.requestCount) + (r.silentNote ? '　' + r.silentNote : ''), 'ok');
+    setStatus(ch === 'local'
+      ? '本机 serve 可用 · 账号 ' + r.username + ' · 本次可见 ' + fmtNum(r.requestCount) + ' 条记录'
+      : (direct
+        ? 'API key 有效 · 账号 ' + r.username + ' · 本次可见 ' + fmtNum(r.requestCount) + ' 条记录'
+        : '已登录 · 用户 ' + r.username + ' · 请求数 ' + fmtNum(r.requestCount) + (r.silentNote ? '　' + r.silentNote : '')), 'ok');
   }else{
     renderBalance(null);
-    setStatus(direct
-      ? (r.message || 'API key 无效') + ' —— 在顶部 key 框里改好后点「保存」'
-      : (r.message || '未登录') + ' —— 点右上角「去登录」（会打开浏览器窗口）', 'bad');
+    setStatus(ch === 'local'
+      ? (r.message || '本机 serve 不可用') + ' —— 确认 18100 在跑（apis 启动会自动拉起）'
+      : (direct
+        ? (r.message || 'API key 无效') + ' —— 在顶部 key 框里改好后点「保存」'
+        : (r.message || '未登录') + ' —— 点右上角「去登录」（会打开浏览器窗口）'), 'bad');
   }
 }
 

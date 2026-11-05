@@ -13,7 +13,7 @@
          暂存区在 workspace:tools/CatTemp（2026-10-25 目录下沉后的位置）
          🔴 宿主**不引用** Core：Core 由部署脚本单独发布到 core/<槽>/，影子副本从那里复制 -->
     <PublishDir>..\..\tools\CatTemp\asa-publish\</PublishDir>
-    <Version>0.26.3</Version>
+    <Version>0.26.4</Version>
   </PropertyGroup>
 
   <ItemGroup>
