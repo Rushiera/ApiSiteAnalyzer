@@ -978,7 +978,7 @@ function renderRecent(rows, sym){
     /* 类型列已撤——异常记录（非消费）就在时间格里挂个小标签，失败仍然看得见 */
     '<td>'+esc(fmtTime(r.createdAt))+(r.type !== 2 ? ' <span class="tag">'+esc(TYPE_NAME[r.type] || r.type)+'</span>' : '')+'</td>' +
     '<td class="colsite">'+esc(r.siteName || '—')+'</td>' +
-    '<td title="'+esc(r.upstreamModel)+'">'+esc(r.modelName || '—')+'</td>' +
+    '<td title="'+esc((r.modelName && r.upstreamModel && r.modelName !== r.upstreamModel) ? ('请求名 '+r.modelName+' · 实际 '+r.upstreamModel) : (r.upstreamModel || r.modelName || ''))+'">'+esc(r.upstreamModel || r.modelName || '—')+'</td>' +
     '<td>'+(r.reasoningEffort ? esc(r.reasoningEffort) : '—')+'</td>' +
     '<td class="num">'+fmtNum(r.promptTokens)+cacheLine(r)+'</td>' +
     '<td class="num">'+fmtNum(r.completionTokens)+'</td>' +
