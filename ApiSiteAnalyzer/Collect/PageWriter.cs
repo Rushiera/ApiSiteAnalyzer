@@ -41,6 +41,15 @@ public static class PageWriter
             Content = row.Content,
             ReasoningEffort = row.ReasoningEffort,
             SessionId = row.SessionId,
+            Ok = row.Ok,
+            Status = row.Status,
+            ErrorKind = row.ErrorKind,
+            Realm = row.Realm,
+            Uid = row.Uid,
+            Nickname = row.Nickname,
+            ConvSource = row.ConvSource,
+            SameRetries = row.SameRetries,
+            FallbackFrom = row.FallbackFrom,
         };
     }
 

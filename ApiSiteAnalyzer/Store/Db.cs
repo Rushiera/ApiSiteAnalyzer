@@ -74,6 +74,33 @@ public sealed class UsageRecord
 
     /// <summary>会话标识（站点原值；空 = 站点没给）。</summary>
     public string SessionId { get; set; } = "";
+
+    /// <summary>是否成功（默认 true——只有提供状态码的站点才算得准失败率）。</summary>
+    public bool Ok { get; set; } = true;
+
+    /// <summary>上游 HTTP 状态码（0 = 站点没给）。</summary>
+    public long Status { get; set; }
+
+    /// <summary>错误分类（空 = 成功或站点没给）。</summary>
+    public string ErrorKind { get; set; } = "";
+
+    /// <summary>区域（空 = 站点没给）。</summary>
+    public string Realm { get; set; } = "";
+
+    /// <summary>账号标识（脱敏 uid；空 = 站点没给）。</summary>
+    public string Uid { get; set; } = "";
+
+    /// <summary>账号昵称（空 = 站点没给）。</summary>
+    public string Nickname { get; set; } = "";
+
+    /// <summary>会话 id 来源（空 = 站点没给）。</summary>
+    public string ConvSource { get; set; } = "";
+
+    /// <summary>同号重试次数。</summary>
+    public long SameRetries { get; set; }
+
+    /// <summary>降级前的模型名（空 = 未降级）。</summary>
+    public string FallbackFrom { get; set; } = "";
 }
 
 /// <summary>聚合行——分组统计的通用载体（名称 + 计数 + 额度 + token）。</summary>
@@ -378,6 +405,15 @@ CREATE TABLE IF NOT EXISTS site_snapshot (
         //        破坏性变更（删列 / 改类型 / 改主键）才递增 SchemaVersion。
         EnsureColumn("usage_log", "reasoning_effort", "TEXT NOT NULL DEFAULT ''");
         EnsureColumn("usage_log", "session_id", "TEXT NOT NULL DEFAULT ''");
+        EnsureColumn("usage_log", "ok", "INTEGER NOT NULL DEFAULT 1");
+        EnsureColumn("usage_log", "status", "INTEGER NOT NULL DEFAULT 0");
+        EnsureColumn("usage_log", "error_kind", "TEXT NOT NULL DEFAULT ''");
+        EnsureColumn("usage_log", "realm", "TEXT NOT NULL DEFAULT ''");
+        EnsureColumn("usage_log", "uid", "TEXT NOT NULL DEFAULT ''");
+        EnsureColumn("usage_log", "nickname", "TEXT NOT NULL DEFAULT ''");
+        EnsureColumn("usage_log", "conv_source", "TEXT NOT NULL DEFAULT ''");
+        EnsureColumn("usage_log", "same_retries", "INTEGER NOT NULL DEFAULT 0");
+        EnsureColumn("usage_log", "fallback_from", "TEXT NOT NULL DEFAULT ''");
     }
 
     /// <summary>缺列则加列（幂等）——<c>PRAGMA table_info</c> 判定，缺才 <c>ALTER TABLE ADD COLUMN</c>。</summary>
@@ -420,10 +456,12 @@ CREATE TABLE IF NOT EXISTS site_snapshot (
         cmd.CommandText = @"
 INSERT INTO usage_log (site_id, log_key, remote_id, created_at, type, model_name, token_name, group_name,
   quota, prompt_tokens, completion_tokens, cache_tokens, use_time, first_token_ms, speed_tps, is_stream,
-  channel, upstream_model, request_id, content, reasoning_effort, session_id)
+  channel, upstream_model, request_id, content, reasoning_effort, session_id,
+  ok, status, error_kind, realm, uid, nickname, conv_source, same_retries, fallback_from)
 VALUES ($site, $key, $rid, $created, $type, $model, $token, $grp,
   $quota, $pt, $ct, $cache, $use, $frt, $tps, $stream,
-  $channel, $upstream, $reqid, $content, $effort, $session)
+  $channel, $upstream, $reqid, $content, $effort, $session,
+  $ok, $status, $errkind, $realm, $uid, $nick, $convs, $sameretry, $fallback)
 ON CONFLICT (site_id, log_key) DO UPDATE SET
   remote_id=excluded.remote_id, created_at=excluded.created_at, type=excluded.type,
   model_name=excluded.model_name, token_name=excluded.token_name, group_name=excluded.group_name,
@@ -431,7 +469,10 @@ ON CONFLICT (site_id, log_key) DO UPDATE SET
   cache_tokens=excluded.cache_tokens, use_time=excluded.use_time, first_token_ms=excluded.first_token_ms,
   speed_tps=excluded.speed_tps, is_stream=excluded.is_stream, channel=excluded.channel,
   upstream_model=excluded.upstream_model, request_id=excluded.request_id, content=excluded.content,
-  reasoning_effort=excluded.reasoning_effort, session_id=excluded.session_id;
+  reasoning_effort=excluded.reasoning_effort, session_id=excluded.session_id,
+  ok=excluded.ok, status=excluded.status, error_kind=excluded.error_kind, realm=excluded.realm,
+  uid=excluded.uid, nickname=excluded.nickname, conv_source=excluded.conv_source,
+  same_retries=excluded.same_retries, fallback_from=excluded.fallback_from;
 ";
 
         var pSite = cmd.Parameters.Add("$site", SqliteType.Text);
@@ -456,6 +497,15 @@ ON CONFLICT (site_id, log_key) DO UPDATE SET
         var pContent = cmd.Parameters.Add("$content", SqliteType.Text);
         var pEffort = cmd.Parameters.Add("$effort", SqliteType.Text);
         var pSession = cmd.Parameters.Add("$session", SqliteType.Text);
+        var pOk = cmd.Parameters.Add("$ok", SqliteType.Integer);
+        var pStatus = cmd.Parameters.Add("$status", SqliteType.Integer);
+        var pErrKind = cmd.Parameters.Add("$errkind", SqliteType.Text);
+        var pRealm = cmd.Parameters.Add("$realm", SqliteType.Text);
+        var pUid = cmd.Parameters.Add("$uid", SqliteType.Text);
+        var pNick = cmd.Parameters.Add("$nick", SqliteType.Text);
+        var pConvS = cmd.Parameters.Add("$convs", SqliteType.Text);
+        var pSameRetry = cmd.Parameters.Add("$sameretry", SqliteType.Integer);
+        var pFallback = cmd.Parameters.Add("$fallback", SqliteType.Text);
 
         int written = 0;
         foreach (UsageRecord record in records)
@@ -482,6 +532,15 @@ ON CONFLICT (site_id, log_key) DO UPDATE SET
             pContent.Value = record.Content;
             pEffort.Value = record.ReasoningEffort;
             pSession.Value = record.SessionId;
+            pOk.Value = record.Ok ? 1 : 0;
+            pStatus.Value = record.Status;
+            pErrKind.Value = record.ErrorKind;
+            pRealm.Value = record.Realm;
+            pUid.Value = record.Uid;
+            pNick.Value = record.Nickname;
+            pConvS.Value = record.ConvSource;
+            pSameRetry.Value = record.SameRetries;
+            pFallback.Value = record.FallbackFrom;
             written += cmd.ExecuteNonQuery();
         }
 
@@ -802,7 +861,9 @@ ON CONFLICT (site_id) DO UPDATE SET fetched_at=excluded.fetched_at, total_count=
     /// <returns>聚合行（按 token 之和倒序）。</returns>
     public List<AggregateRow> ByModel(string siteId, IReadOnlyList<int> types, int limit)
     {
-        return GroupBy(siteId, "model_name", types, limit);
+        // [段] 模型维按「实际模型」聚合——壳侧台账把客户端档位名（high/low）记在 model_name，
+        //      真模型在 upstream_model；两者不一致时以真模型为准，与 work 控制台「按模型」同口径。
+        return GroupBy(siteId, "CASE WHEN upstream_model <> '' THEN upstream_model ELSE model_name END", types, limit);
     }
 
     /// <summary>按令牌聚合。</summary>

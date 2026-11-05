@@ -87,6 +87,33 @@ public sealed class UsageRow
 
     /// <summary>会话标识（站点原值，如 <c>cat-home4-639259389468574799</c>；空 = 站点没给）。</summary>
     public string SessionId { get; set; } = "";
+
+    /// <summary>是否成功（0/1 以外站点不提供时置 true——失败率只有提供了状态码的站点才算得准）。</summary>
+    public bool Ok { get; set; } = true;
+
+    /// <summary>上游 HTTP 状态码（0 = 站点没给）。</summary>
+    public long Status { get; set; }
+
+    /// <summary>错误分类（空 = 成功或站点没给）。</summary>
+    public string ErrorKind { get; set; } = "";
+
+    /// <summary>区域（如 <c>cn</c> / <c>intl</c>；空 = 站点没给）。</summary>
+    public string Realm { get; set; } = "";
+
+    /// <summary>账号标识（脱敏后的 uid；空 = 站点没给）。</summary>
+    public string Uid { get; set; } = "";
+
+    /// <summary>账号昵称（空 = 站点没给）。</summary>
+    public string Nickname { get; set; } = "";
+
+    /// <summary>会话 id 来源（<c>client</c> / <c>derived</c> / <c>custom</c>；空 = 站点没给）。</summary>
+    public string ConvSource { get; set; } = "";
+
+    /// <summary>同号重试次数（0 = 未走）。</summary>
+    public long SameRetries { get; set; }
+
+    /// <summary>降级前的模型名（空 = 未降级）。</summary>
+    public string FallbackFrom { get; set; } = "";
 }
 
 /// <summary>

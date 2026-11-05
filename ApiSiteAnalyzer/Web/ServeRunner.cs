@@ -64,6 +64,9 @@ public static class ServeRunner
         // [段1] 单页
         app.MapGet("/", () => Results.Content(ReadIndex(), "text/html; charset=utf-8"));
 
+        // [段1b] HUB 页——work 控制台「中转站」按钮的 iframe 落点（同一份单页，独立可直达）
+        app.MapGet("/hub", () => Results.Content(ReadIndex(), "text/html; charset=utf-8"));
+
         // [段2] 站点清单 + 库内计数（面板首屏）
         app.MapGet("/api/sites", () =>
         {

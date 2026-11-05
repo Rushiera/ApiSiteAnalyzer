@@ -97,7 +97,7 @@ public sealed class SiteSession
     public async Task<LoginState> ProbeLoginAsync(IApiSite site, CancellationToken ct)
     {
         // [段0] API key 直连站点（特批）——不经浏览器，直接用 key 调取数接口探活
-        if (site is IDirectSite direct && direct.ApiKey.Length > 0)
+        if (site is IDirectSite direct && (direct.ApiKey.Length > 0 || direct.AlwaysDirect))
         {
             return await ProbeDirectAsync(direct, ct).ConfigureAwait(false);
         }
@@ -174,7 +174,7 @@ public sealed class SiteSession
         CancellationToken ct)
     {
         // [段0] API key 直连站点（特批）——一次请求拿全量，不经浏览器
-        if (site is IDirectSite direct && direct.ApiKey.Length > 0)
+        if (site is IDirectSite direct && (direct.ApiKey.Length > 0 || direct.AlwaysDirect))
         {
             return await FetchDirectAsync(direct, options, onPage, progress, ct).ConfigureAwait(false);
         }
@@ -298,7 +298,7 @@ public sealed class SiteSession
         var result = new ProbeResult();
 
         // [段0] API key 直连站点（特批）——没有浏览器会话可侦察，出声拒绝
-        if (site is IDirectSite direct && direct.ApiKey.Length > 0)
+        if (site is IDirectSite direct && (direct.ApiKey.Length > 0 || direct.AlwaysDirect))
         {
             result.Error = "该站点走 API key 直连通道，无浏览器会话可侦察";
             return result;
@@ -412,7 +412,7 @@ public sealed class SiteSession
     public async Task<(BrowserInstance Instance, string RedeemNote)> OpenLoginAsync(IApiSite site, string redeemCode, CancellationToken ct)
     {
         // [段0] API key 直连站点（特批）——没有浏览器登录这回事，出声拒绝（不静默什么都不做）
-        if (site is IDirectSite direct && direct.ApiKey.Length > 0)
+        if (site is IDirectSite direct && (direct.ApiKey.Length > 0 || direct.AlwaysDirect))
         {
             throw new InvalidOperationException("该站点走 API key 直连通道，不需要浏览器登录");
         }
@@ -555,7 +555,7 @@ public sealed class SiteSession
     public async Task<(bool Switched, LoginState? Login)> SwitchToSilentAsync(IApiSite site, CancellationToken ct)
     {
         // [段0] 直连站没有浏览器实例这回事
-        if (site is IDirectSite direct && direct.ApiKey.Length > 0)
+        if (site is IDirectSite direct && (direct.ApiKey.Length > 0 || direct.AlwaysDirect))
         {
             return (false, null);
         }
@@ -806,9 +806,20 @@ public sealed class SiteSession
     /// <param name="site">站点适配器（ApiKey 非空）。</param>
     /// <param name="ct">取消令牌。</param>
     /// <returns>原始 JSON 响应体。</returns>
-    private static async Task<string> GetDirectAsync(IDirectSite site, CancellationToken ct)
+    private static Task<string> GetDirectAsync(IDirectSite site, CancellationToken ct)
     {
-        string url = site.BuildUsageUrl();
+        return GetDirectUrlAsync(site.BuildUsageUrl(), site.ApiKey, ct);
+    }
+
+    /// <summary>
+    /// 直连取数（按完整 URL）——分页通道也走这里：重试与失败出声只有这一份实现。
+    /// </summary>
+    /// <param name="url">完整取数 URL。</param>
+    /// <param name="apiKey">凭据（本机 serve 类站点为空，不带 Authorization 头）。</param>
+    /// <param name="ct">取消令牌。</param>
+    /// <returns>原始 JSON 响应体。</returns>
+    private static async Task<string> GetDirectUrlAsync(string url, string apiKey, CancellationToken ct)
+    {
 
         // [段1] 连接层重试——TLS / 连接抖动实测出现过（一次 SSL handshake 失败，随后即恢复）；
         //        自动采集间隔 29s，单次抖动不该让整轮记为失败。HTTP 状态类失败不重试（照原样出声）。
@@ -823,7 +834,10 @@ public sealed class SiteSession
             try
             {
                 using var request = new HttpRequestMessage(HttpMethod.Get, url);
-                request.Headers.Add("Authorization", "Bearer " + site.ApiKey);
+                if (apiKey.Length > 0)
+                {
+                    request.Headers.Add("Authorization", "Bearer " + apiKey);
+                }
 
                 using HttpResponseMessage response = await DirectHttp.SendAsync(request, ct).ConfigureAwait(false);
                 string body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
@@ -909,6 +923,53 @@ public sealed class SiteSession
 
         try
         {
+            if (site is IPagedDirectSite paged)
+            {
+                progress("直连取数中（本机 serve，按页拉取）…");
+                int offset = 0;
+                int pageNo = 0;
+                int fetched = 0;
+                while (true)
+                {
+                    pageNo = pageNo + 1;
+                    string pbody = await GetDirectUrlAsync(paged.BuildUsageUrl(offset, paged.PageSize), "", ct).ConfigureAwait(false);
+                    UsagePage ppage = site.ParseUsagePage(pbody);
+                    if (pageNo == 1)
+                    {
+                        summary.Total = ppage.Total;
+                        summary.Balance = ppage.BalanceQuota;
+                        summary.Username = site.DescribeAccount(pbody);
+                    }
+                    summary.Pages = pageNo;
+                    fetched = fetched + ppage.Records.Count;
+                    summary.Fetched = fetched;
+                    if (ppage.Records.Count > 0)
+                    {
+                        PageOutcome poutcome = onPage(pageNo, ppage);
+                        summary.Added = summary.Added + poutcome.NewCount;
+                        summary.Matched = summary.Matched + poutcome.MatchedCount;
+                        if (poutcome.Stop)
+                        {
+                            summary.Ok = true;
+                            progress("直连取数提前收口（已追平）：" + fetched + " 条 · 新增 " + summary.Added + " · 一致 " + summary.Matched);
+                            return summary;
+                        }
+                    }
+                    offset = offset + ppage.Records.Count;
+                    if (ppage.Records.Count < paged.PageSize)
+                    {
+                        break;
+                    }
+                    if (summary.Total > 0 && offset >= summary.Total)
+                    {
+                        break;
+                    }
+                }
+                progress("直连取数完成：" + fetched + " 条 · 新增 " + summary.Added + " · 一致 " + summary.Matched);
+                summary.Ok = true;
+                return summary;
+            }
+
             progress("直连取数中（API key）…");
             string body = await GetDirectAsync(site, ct).ConfigureAwait(false);
             UsagePage page = site.ParseUsagePage(body);

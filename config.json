@@ -28,6 +28,15 @@
       "profileDir": "",
       "quotaPerUnit": 1000000,
       "currencySymbol": "¥"
+    },
+    {
+      "id": "workbuddy",
+      "type": "workserve",
+      "displayName": "中转站",
+      "baseUrl": "http://127.0.0.1:18100",
+      "profileDir": "",
+      "quotaPerUnit": 2000000,
+      "currencySymbol": "¥"
     }
   ]
 }

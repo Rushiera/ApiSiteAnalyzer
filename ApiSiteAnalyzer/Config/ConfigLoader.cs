@@ -183,6 +183,7 @@ public static class ConfigLoader
     {
         return string.Equals(type, "newapi", StringComparison.OrdinalIgnoreCase)
             || string.Equals(type, "buddy", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(type, "workserve", StringComparison.OrdinalIgnoreCase)
             || string.Equals(type, "sub2api", StringComparison.OrdinalIgnoreCase);
     }
 

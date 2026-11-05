@@ -172,6 +172,11 @@ public static class Program
             return new Sub2ApiSite(item.Id, item.DisplayName, item.BaseUrl, profileDir, item.QuotaPerUnit, item.CurrencySymbol);
         }
 
+        if (string.Equals(item.Type, "workserve", StringComparison.OrdinalIgnoreCase))
+        {
+            return new WorkServeSite(item.Id, item.DisplayName, item.BaseUrl, profileDir, item.QuotaPerUnit, item.CurrencySymbol);
+        }
+
         return new NewApiSite(item.Id, item.DisplayName, item.BaseUrl, profileDir, item.QuotaPerUnit, item.CurrencySymbol);
     }
     /// <summary>余额位取值——台账口径的站点（BalanceFromLedger，如知序空间「已用积分」）取本地累计消费，其余取探针值。</summary>

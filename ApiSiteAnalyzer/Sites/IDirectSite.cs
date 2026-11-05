@@ -13,6 +13,15 @@ public interface IDirectSite : IApiSite
     /// </summary>
     string ApiKey { get; set; }
 
+    /// <summary>
+    /// 是否恒走直连——本机常驻服务类站点（如 work 壳的 serve）没有浏览器登录面，也没有凭据：
+    /// 为 true 时上层「有 key 即直连」的判据放宽为「有 key 或本站恒直连」，不会再尝试拉起浏览器。
+    /// </summary>
+    bool AlwaysDirect
+    {
+        get { return false; }
+    }
+
     /// <summary>直连取数地址（完整 URL，含该站自己的认证形态——查询参数或请求头由调用方补齐）。</summary>
     /// <returns>完整取数 URL。</returns>
     string BuildUsageUrl();
