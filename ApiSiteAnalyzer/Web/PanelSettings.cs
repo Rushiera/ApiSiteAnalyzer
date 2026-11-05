@@ -33,6 +33,15 @@ public sealed class PanelSettings
     /// <summary>设置落盘路径（构造时绑定）。</summary>
     private readonly string _path;
 
+    /// <summary>热读闸——Kestrel 请求并发进来，mtime 判定与重读须串行。</summary>
+    private readonly object _refreshGate = new object();
+
+    /// <summary>上一次读到的文件修改时刻（UTC）。</summary>
+    private DateTime _stampMtime = DateTime.MinValue;
+
+    /// <summary>上一次读到的文件长度——mtime 精度不足时由长度兜底。</summary>
+    private long _stampLength = -1;
+
     /// <summary>构造——绑定落盘路径并读盘（无文件用默认值）。</summary>
     /// <param name="path">设置文件路径（data/settings.json）。</param>
     public PanelSettings(string path)
@@ -40,6 +49,7 @@ public sealed class PanelSettings
         _path = path;
         Load();
         CardOrder = NormalizeCardOrder(CardOrder);
+        RememberStamp();
     }
 
     /// <summary>是否开启自动采集（默认开）。</summary>
@@ -209,12 +219,13 @@ public sealed class PanelSettings
         Save();
     }
 
-    /// <summary>读盘（文件不存在 / 损坏 / 读不到一律用默认值——出声由调用方决定）。</summary>
-    private void Load()
+    /// <summary>读盘（文件不存在 / 损坏 / 读不到一律不动内存值——调用方决定怎么出声）。</summary>
+    /// <returns>采纳成功返回 true；文件缺失或内容不可用返回 false（内存值保持原样）。</returns>
+    private bool Load()
     {
         if (!File.Exists(_path))
         {
-            return;
+            return false;
         }
 
         try
@@ -223,7 +234,7 @@ public sealed class PanelSettings
             SettingsFile? loaded = JsonSerializer.Deserialize<SettingsFile>(text, Options);
             if (loaded is null)
             {
-                return;
+                return false;
             }
 
             AutoEnabled = loaded.AutoEnabled;
@@ -235,14 +246,78 @@ public sealed class PanelSettings
             KeepLoginWindow = loaded.KeepLoginWindow;
             /* 旧设置文件没有 cardOrder（读到 null）→ 给全默认顺序——不静默丢卡片 */
             CardOrder = NormalizeCardOrder(loaded.CardOrder);
+            return true;
         }
         catch (JsonException)
         {
-            // 设置文件损坏——按默认值处理（下次保存覆盖）
+            // 设置文件损坏——不采纳（下次保存覆盖）
+            return false;
         }
         catch (IOException)
         {
-            // 读不到——按默认值处理
+            // 读不到——不采纳
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// 热读——手改 data/settings.json 后下一次调用即生效（mtime / 长度变化才重读）。
+    /// 文件缺失不覆盖内存值；解析失败出声且不采纳（坏文件不把面板打回默认）。
+    /// </summary>
+    /// <returns>本次采纳了外部改动返回 true；无变化 / 文件缺失 / 内容不可用返回 false。</returns>
+    public bool Refresh()
+    {
+        lock (_refreshGate)
+        {
+            try
+            {
+                if (!File.Exists(_path))
+                {
+                    return false;
+                }
+
+                var info = new FileInfo(_path);
+                if (info.LastWriteTimeUtc == _stampMtime && info.Length == _stampLength)
+                {
+                    return false;
+                }
+
+                bool ok = Load();
+                if (!ok)
+                {
+                    Console.Error.WriteLine("settings-reject: 外部改动未采纳（文件损坏或不可读），面板沿用当前设置");
+                }
+
+                /* 无论采纳与否都记住这一版的文件戳——坏文件不让每个请求刷一行日志 */
+                RememberStamp();
+                return ok;
+            }
+            catch (IOException ex)
+            {
+                Console.Error.WriteLine("settings-refresh-fail: " + ex.Message);
+                return false;
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                Console.Error.WriteLine("settings-refresh-fail: " + ex.Message);
+                return false;
+            }
+        }
+    }
+
+    /// <summary>记录当前文件的时刻与长度（写盘后调用，避免把自己的写入当成外部改动）。</summary>
+    private void RememberStamp()
+    {
+        try
+        {
+            var info = new FileInfo(_path);
+            _stampMtime = info.Exists ? info.LastWriteTimeUtc : DateTime.MinValue;
+            _stampLength = info.Exists ? info.Length : -1;
+        }
+        catch (IOException)
+        {
+            _stampMtime = DateTime.MinValue;
+            _stampLength = -1;
         }
     }
 
@@ -268,6 +343,7 @@ public sealed class PanelSettings
             }
 
             File.WriteAllText(_path, JsonSerializer.Serialize(file, Options));
+            RememberStamp();
         }
         catch (IOException ex)
         {

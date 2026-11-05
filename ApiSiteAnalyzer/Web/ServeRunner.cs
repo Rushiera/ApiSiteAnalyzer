@@ -27,9 +27,6 @@ namespace ApiSiteAnalyzer.Web;
 /// </summary>
 public static class ServeRunner
 {
-    /// <summary>内嵌单页路径（程序集内资源名）。</summary>
-    private const string IndexResource = "ApiSiteAnalyzer.Web.wwwroot.index.html";
-
     /// <summary>启动面板。</summary>
     /// <param name="config">配置。</param>
     /// <param name="sites">站点清单。</param>
@@ -40,6 +37,7 @@ public static class ServeRunner
     public static async Task<int> RunAsync(AppConfig config, List<IApiSite> sites, string chromePath, string dataDir, CancellationToken ct)
     {
         var settings = new PanelSettings(Path.Combine(dataDir, "settings.json"));
+        var page = new PanelPage(dataDir);   // 单页文件化——改 data/web/index.html 刷新即生效，不用重编译
         var hub = new BrowserHub(chromePath, Path.Combine(dataDir, "browsers.json"));
         hub.Silent = settings.Silent;
         hub.KeepWindow = settings.KeepLoginWindow;
@@ -61,11 +59,25 @@ public static class ServeRunner
         WebApplication app = builder.Build();
         string token = Guid.NewGuid().ToString("N").Substring(0, 16);
 
-        // [段1] 单页
-        app.MapGet("/", () => Results.Content(ReadIndex(), "text/html; charset=utf-8"));
+        // [段0] 运行期设置热读——手改 data/settings.json，下一次请求即生效；
+        //       config.json 是部署期声明（端口 / 站点清单 / chrome 路径），改它仍须重启，不在此列
+        app.Use((ctx, next) =>
+        {
+            // 外部手改设置文件 → 采纳后同步到浏览器侧（静默 / 保活两项是本进程的运行态开关）
+            if (settings.Refresh())
+            {
+                hub.Silent = settings.Silent;
+                hub.KeepWindow = settings.KeepLoginWindow;
+            }
+
+            return next(ctx);
+        });
+
+        // [段1] 单页——文件通道：data/web/index.html（改完刷新即生效），缺失 / 读失败回落内嵌件
+        app.MapGet("/", () => Results.Content(page.Read(), "text/html; charset=utf-8"));
 
         // [段1b] HUB 页——work 控制台「中转站」按钮的 iframe 落点（同一份单页，独立可直达）
-        app.MapGet("/hub", () => Results.Content(ReadIndex(), "text/html; charset=utf-8"));
+        app.MapGet("/hub", () => Results.Content(page.Read(), "text/html; charset=utf-8"));
 
         // [段2] 站点清单 + 库内计数（面板首屏）
         app.MapGet("/api/sites", () =>
@@ -1582,20 +1594,6 @@ public static class ServeRunner
         }
 
         return null;
-    }
-
-    /// <summary>读内嵌单页。</summary>
-    private static string ReadIndex()
-    {
-        var assembly = typeof(ServeRunner).Assembly;
-        using Stream? stream = assembly.GetManifestResourceStream(IndexResource);
-        if (stream is null)
-        {
-            return "<!doctype html><meta charset=\"utf-8\"><h1>面板资源缺失</h1><p>内嵌单页 " + IndexResource + " 未找到</p>";
-        }
-
-        using var reader = new StreamReader(stream, Encoding.UTF8);
-        return reader.ReadToEnd();
     }
 
     /// <summary>用系统默认浏览器打开面板。</summary>

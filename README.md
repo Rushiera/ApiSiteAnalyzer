@@ -18,10 +18,11 @@ ApiSiteAnalyzer/                主项目
   Collect/                      站点会话（登录探测 + 分页拉取 + 口径快照）+ 逐页落库器
   Sites/                        站点适配器（IApiSite + IDirectSite + NewApiSite + BuddySite + Sub2ApiSite）
   Store/                        SQLite 库（幂等写入 + 增量比对 + 聚合查询）
-  Web/                          Minimal API 端点 + 自动采集器 + 工作状态监视器 + 跨站聚合器（SiteAggregate）+ wwwroot/index.html
+  Web/                          Minimal API 端点 + 自动采集器 + 工作状态监视器 + 跨站聚合器（SiteAggregate）+ PanelPage（单页文件化）+ wwwroot/index.html
 config.json                     站点清单 + 端口 + chrome 路径
 data/                           运行时生成：usage.db · settings.json · browsers.json · profiles/<站点>/
 启动.bat                        启动器：停旧面板 → 起最新槽位
+部署.ps1                        部署脚本：编译到暂存区 → 成功才移入空闲槽
 ApiSiteAnalyzer_A.exe           槽位 A（部署产物，随仓走）
 ApiSiteAnalyzer_B.exe           槽位 B
 ```
@@ -92,6 +93,37 @@ ApiSiteAnalyzer_A.exe probe            # 侦察（新站点接入用）：原始
   降级计数只认**自动轮次**的「无新增」——手动与反查不干扰自动节奏（人手操作不该把间隔翻倍）
 - 顶部状态按视图给出：单站视图显示该站「间隔 / 降级 / 停采 + 下次时刻」；总览视图显示「N 站（降级 x）（异常停采 y）（最近的下次时刻）」
 - 间隔越界一律夹进 3–119；`auto` / `interval` 缺值或非法值**报错拒绝**，不静默回落默认值
+
+## 改动 → 生效（四层）
+
+「改一行就要停整个面板」不是需求的语义要求，而是**编译产物与运行产物同址**造成的。本项目按改动面给最短路径：
+
+| 层 | 改什么 | 怎么做 | 判据（可复跑） |
+|:--:|:--|:--|:--|
+| 1 | 页面（HTML / CSS / JS） | 改 `data/web/index.html` → 刷新浏览器 | 页面内容即文件内容；面板进程 id 不变 |
+| 2 | 运行期设置 | 改 `data/settings.json` → 下一次请求生效 | 面板显示的间隔 / 静默 / 保活随之变化 |
+| 3 | 业务代码 | `.\部署.ps1` → 双击 `启动.bat` | 编译期服务照跑；编译失败运行区一字未动 |
+| 4 | 部署期配置 | 改 `config.json` → 重启 | 端口 / 站点清单 / chrome 路径只在启动时读 |
+
+### 页面外置（第 1 层）
+
+首次启动把内嵌页导出为 `data/web/index.html`（首行 `<!-- panel-page vX -->` 是版本标记），之后每次请求按 **mtime + 长度**重读：
+
+- 文件缺失 / 读不到 → 回退内嵌件，stderr 出声 `page-read-fail`（不空页、不静默）
+- 内嵌版本升级 → 旧文件转 `index.html.bak-<时刻>` 再导出（`page-upgrade`）
+- **删掉首行版本标记 = 声明这是自定义件**，升级不再覆盖它（避免升级吃掉手改内容）
+
+### 设置热读（第 2 层）
+
+`data/settings.json` 手改后下一次请求即采纳；解析失败**不采纳**并出声 `settings-reject`——坏文件不会把面板打回默认值。
+`config.json` 是**部署期声明**（端口 / 站点清单 / chrome 路径），改它仍须重启：这条边界写在代码注释与本节，不靠记忆。
+
+### 部署（第 3 层）
+
+`部署.ps1`：编译到仓库外暂存区 → 成功才移入**空闲槽**（运行中的槽不解锁）→ 双击 `启动.bat` 切换。
+两条硬判据：编译失败运行区不动；运行中的文件不覆盖。
+
+> **未做（如实记录）**：业务程序集的**进程内换核**（可回收 ALC + 影子副本）尚未落地——第 3 层当前是「换槽重启」，进程中断 1–2 秒。等改码频率证明它值得，再拆契约 / 核心 / 宿主三层。
 
 ## 更新（双槽部署）
 
