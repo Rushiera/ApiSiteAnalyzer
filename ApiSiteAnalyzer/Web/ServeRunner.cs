@@ -656,6 +656,78 @@ public static class ServeRunner
             });
         });
 
+        // [段7a] 全量导出——整体搬运用的分页出口（列全、只读不改库）；导入方按 nextOffset 取到 total 为止
+        app.MapGet("/api/export", (HttpContext context) =>
+        {
+            string siteId = context.Request.Query["site"].ToString();
+            IApiSite? site = sites.FirstOrDefault(s => s.Id == siteId);
+            if (site is null)
+            {
+                return Results.Json(new { ok = false, error = "未知站点：" + siteId });
+            }
+
+            // [段1] 分页参数——缺省取默认值；给了但非法一律报错（入口面零容忍，不静默回落）
+            int offset = 0;
+            string offsetRaw = context.Request.Query["offset"].ToString();
+            if (offsetRaw.Length > 0 && (!int.TryParse(offsetRaw, out offset) || offset < 0))
+            {
+                return Results.Json(new { ok = false, error = "offset 非法：" + offsetRaw });
+            }
+
+            int limit = 1000;
+            string limitRaw = context.Request.Query["limit"].ToString();
+            if (limitRaw.Length > 0 && (!int.TryParse(limitRaw, out limit) || limit < 1 || limit > 2000))
+            {
+                return Results.Json(new { ok = false, error = "limit 非法（1-2000）：" + limitRaw });
+            }
+
+            using var db = new Db(dbPath);
+            long total = db.Count(siteId);
+            List<UsageRecord> rows = db.Export(siteId, offset, limit);
+            return Results.Json(new
+            {
+                ok = true,
+                site = siteId,
+                total,
+                offset,
+                limit,
+                nextOffset = offset + rows.Count,
+                rows = rows.Select(r => new
+                {
+                    logKey = r.LogKey,
+                    remoteId = r.RemoteId,
+                    createdAt = r.CreatedAt,
+                    type = r.Type,
+                    modelName = r.ModelName,
+                    tokenName = r.TokenName,
+                    groupName = r.GroupName,
+                    quota = r.Quota,
+                    promptTokens = r.PromptTokens,
+                    completionTokens = r.CompletionTokens,
+                    cacheTokens = r.CacheTokens,
+                    useTime = r.UseTime,
+                    firstTokenMs = r.FirstTokenMs,
+                    speedTps = r.SpeedTps,
+                    isStream = r.IsStream,
+                    channel = r.Channel,
+                    upstreamModel = r.UpstreamModel,
+                    requestId = r.RequestId,
+                    content = r.Content,
+                    reasoningEffort = r.ReasoningEffort,
+                    sessionId = r.SessionId,
+                    ok = r.Ok,
+                    status = r.Status,
+                    errorKind = r.ErrorKind,
+                    realm = r.Realm,
+                    uid = r.Uid,
+                    nickname = r.Nickname,
+                    convSource = r.ConvSource,
+                    sameRetries = r.SameRetries,
+                    fallbackFrom = r.FallbackFrom,
+                }),
+            });
+        });
+
         // [段7b] 已探明请求 ID 明细——卡片点开的逐条清单（去重后按时刻倒序分页）；site=__all 为跨站合并
         app.MapGet("/api/request-ids", (HttpContext context) =>
         {

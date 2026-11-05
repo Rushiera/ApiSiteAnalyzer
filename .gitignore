@@ -15,3 +15,6 @@ publish/
 workbuddy-manager/
 serve/
 WorkBuddyShell*
+
+# 合并期：壳的搬运产物目录（serve 关键服务整体搬运落点——exe / dll / data 全在此，不进仓）
+apis/

@@ -1388,4 +1388,70 @@ ON CONFLICT (site_id) DO UPDATE SET fetched_at=excluded.fetched_at, total_count=
     {
         _conn.Dispose();
     }
+    /// <summary>
+    /// 全量导出（按时刻倒序分页）——供外部整体搬运，只读不改库。
+    /// <para>
+    /// 与 <see cref="Recent"/> 的差别：带 <paramref name="offset"/> 游标、列全（含 ok / status / error_kind /
+    /// realm / uid / nickname / conv_source / same_retries / fallback_from 等后加列）——导入方拿到的是完整行。
+    /// </para>
+    /// </summary>
+    /// <param name="siteId">站点键。</param>
+    /// <param name="offset">已取条数（0 起）。</param>
+    /// <param name="limit">本次条数（1..2000，调用方夹取）。</param>
+    /// <returns>记录清单（新在前）。</returns>
+    public List<UsageRecord> Export(string siteId, int offset, int limit)
+    {
+        var rows = new List<UsageRecord>();
+
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT log_key, remote_id, created_at, type, model_name, token_name, group_name, quota, " +
+            "prompt_tokens, completion_tokens, cache_tokens, use_time, first_token_ms, speed_tps, is_stream, channel, " +
+            "upstream_model, request_id, content, reasoning_effort, session_id, ok, status, error_kind, realm, uid, " +
+            "nickname, conv_source, same_retries, fallback_from FROM usage_log WHERE site_id=$site " +
+            "ORDER BY created_at DESC, remote_id DESC LIMIT $limit OFFSET $offset;";
+        cmd.Parameters.AddWithValue("$site", siteId);
+        cmd.Parameters.AddWithValue("$limit", limit);
+        cmd.Parameters.AddWithValue("$offset", offset);
+
+        using SqliteDataReader reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            rows.Add(new UsageRecord
+            {
+                SiteId = siteId,
+                LogKey = reader.GetString(0),
+                RemoteId = reader.GetInt64(1),
+                CreatedAt = reader.GetInt64(2),
+                Type = reader.GetInt32(3),
+                ModelName = reader.GetString(4),
+                TokenName = reader.GetString(5),
+                GroupName = reader.GetString(6),
+                Quota = reader.GetInt64(7),
+                PromptTokens = reader.GetInt64(8),
+                CompletionTokens = reader.GetInt64(9),
+                CacheTokens = reader.GetInt64(10),
+                UseTime = reader.GetInt64(11),
+                FirstTokenMs = reader.GetInt64(12),
+                SpeedTps = reader.GetDouble(13),
+                IsStream = reader.GetInt64(14) != 0,
+                Channel = reader.GetInt64(15),
+                UpstreamModel = reader.GetString(16),
+                RequestId = reader.GetString(17),
+                Content = reader.GetString(18),
+                ReasoningEffort = reader.GetString(19),
+                SessionId = reader.GetString(20),
+                Ok = reader.GetInt64(21) != 0,
+                Status = reader.GetInt64(22),
+                ErrorKind = reader.GetString(23),
+                Realm = reader.GetString(24),
+                Uid = reader.GetString(25),
+                Nickname = reader.GetString(26),
+                ConvSource = reader.GetString(27),
+                SameRetries = reader.GetInt64(28),
+                FallbackFrom = reader.GetString(29),
+            });
+        }
+
+        return rows;
+    }
 }
