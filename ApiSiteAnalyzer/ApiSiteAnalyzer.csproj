@@ -6,25 +6,25 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>
     <AssemblyName>ApiSiteAnalyzer</AssemblyName>
-    <RootNamespace>ApiSiteAnalyzer</RootNamespace>
+    <RootNamespace>ApiSiteAnalyzer.Host</RootNamespace>
     <InvariantGlobalization>true</InvariantGlobalization>
     <!-- 发布先落 CatTemp 暂存区（仓库外），再 move 入空闲槽——
          运行中的 exe 锁文件，直接发布到槽位会失败（KKManager 判例）
-         暂存区在 workspace:tools/CatTemp（2026-10-25 目录下沉后的位置） -->
+         暂存区在 workspace:tools/CatTemp（2026-10-25 目录下沉后的位置）
+         🔴 宿主**不引用** Core：Core 由部署脚本单独发布到 core/<槽>/，影子副本从那里复制 -->
     <PublishDir>..\..\tools\CatTemp\asa-publish\</PublishDir>
-    <Version>0.25.0</Version>
+    <Version>0.26.3</Version>
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- AspNetCore 框架：Core 在自定义 ALC 里跑 Kestrel，框架程序集只能由宿主 runtimeconfig 声明，
+         否则新 ALC 回落默认 ALC 时找不到 Microsoft.AspNetCore（实测 FileNotFoundException） -->
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.0" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <EmbeddedResource Include="Web\wwwroot\index.html" />
+    <!-- 只引契约——静态引用 Core 会让可回收 ALC 永远回收不掉 -->
+    <ProjectReference Include="..\ApiSiteAnalyzer.Contract\ApiSiteAnalyzer.Contract.csproj" />
   </ItemGroup>
 
 </Project>

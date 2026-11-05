@@ -16,10 +16,10 @@ setlocal
 cd /d "%~dp0"
 set PORT=8766
 
-set EXE=
-for /f "delims=" %%f in ('dir /b /o-d /a-d "ApiSiteAnalyzer_*.exe" 2^>nul') do if not defined EXE set "EXE=%%f"
-if not defined EXE (
-  echo [ERROR] no ApiSiteAnalyzer_*.exe found in this folder
+set SLOT=
+for /f "delims=" %%d in ('dir /b /o-d /ad "slot_*" 2^>nul') do if not defined SLOT set "SLOT=%%d"
+if not defined SLOT (
+  echo [ERROR] no slot_* folder found in this folder
   pause
   exit /b 2
 )
@@ -34,5 +34,5 @@ for /f "tokens=5" %%p in ('netstat -ano ^| findstr ":%PORT% " ^| findstr "LISTEN
 if "%KILLED%"=="0" echo   (nothing was listening)
 timeout /t 1 /nobreak >nul
 
-echo Starting %EXE% ...
-start "" "%EXE%" serve
+echo Starting %SLOT%\ApiSiteAnalyzer.exe ...
+start "" "%SLOT%\ApiSiteAnalyzer.exe" serve

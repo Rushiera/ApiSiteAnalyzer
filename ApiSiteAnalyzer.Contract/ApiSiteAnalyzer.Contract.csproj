@@ -1,0 +1,13 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>ApiSiteAnalyzer.Contract</AssemblyName>
+    <RootNamespace>ApiSiteAnalyzer.Contract</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <Version>0.26.0</Version>
+  </PropertyGroup>
+
+</Project>

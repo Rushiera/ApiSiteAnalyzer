@@ -18,3 +18,7 @@ WorkBuddyShell*
 
 # 合并期：壳的搬运产物目录（serve 关键服务整体搬运落点——exe / dll / data 全在此，不进仓）
 apis/
+
+# 部署产物：非单文件发布后槽位是**目录**（exe + dll + core/），由 部署.ps1 生成，不进仓
+slot_A/
+slot_B/

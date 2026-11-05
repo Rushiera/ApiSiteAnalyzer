@@ -12,33 +12,48 @@ API 站用量分析器（**C# / .NET 8**）。把 API 站的用量日志**全量
 ## 目录
 
 ```
-ApiSiteAnalyzer/                主项目
+ApiSiteAnalyzer.Contract/       契约（IShellCore 六成员）——默认 ALC，跨层的唯一面
+ApiSiteAnalyzer.Core/           业务核心（可回收 ALC，进程内热重载）
   Config/                       配置加载（严格模式——未知键 / 类型错报错退出）
   Browser/                      CDP 通道（chrome 启动器 / 会话 / 受控实例中心）
   Collect/                      站点会话（登录探测 + 分页拉取 + 口径快照）+ 逐页落库器
   Sites/                        站点适配器（IApiSite + IDirectSite + NewApiSite + BuddySite + Sub2ApiSite）
   Store/                        SQLite 库（幂等写入 + 增量比对 + 聚合查询）
   Web/                          Minimal API 端点 + 自动采集器 + 工作状态监视器 + 跨站聚合器（SiteAggregate）+ PanelPage（单页文件化）+ wwwroot/index.html
-config.json                     站点清单 + 端口 + chrome 路径
-data/                           运行时生成：usage.db · settings.json · browsers.json · profiles/<站点>/
-启动.bat                        启动器：停旧面板 → 起最新槽位
-部署.ps1                        部署脚本：编译到暂存区 → 成功才移入空闲槽
-ApiSiteAnalyzer_A.exe           槽位 A（部署产物，随仓走）
-ApiSiteAnalyzer_B.exe           槽位 B
+ApiSiteAnalyzer/                宿主（Program + CoreLoader；**不引用 Core 类型**）
+config.json                     站点清单 + 端口 + chrome 路径（部署期声明——改了走第 4 层）
+data/                           运行时生成：usage.db · settings.json · browsers.json · profiles/<站点>/ · run/（令牌 / reload / 影子副本）
+启动.bat                        启动器：停旧面板 → 起最新槽目录
+部署.ps1                        第 4 层：编译宿主 + 核心到暂存区 → 成功才铺空闲槽
+热重载.ps1 · 热重载.bat          第 3 层：publish 核心 → 覆盖 <槽>/core/ → POST /api/service/reload
+slot_A/ · slot_B/               槽位目录：ApiSiteAnalyzer.exe + .dll + .deps.json + .runtimeconfig.json + Contract.dll + core/
+ApiSiteAnalyzer_A.exe           旧单文件版（v0.25 及以前的历史产物，已被 slot_* 目录取代——切勿再用）
 ```
+
+## 改代码怎么生效（四层）
+
+| 层 | 改什么 | 怎么做 | 代价 |
+|:--:|:--|:--|:--|
+| 1 | 页面 `data/web/index.html` | 改完刷新浏览器（mtime 热读） | 零编译 |
+| 2 | 设置 `data/settings.json` | 落盘即生效（坏文件不采纳） | 零重启 |
+| 3 | 业务核心 `ApiSiteAnalyzer.Core/` | `热重载.bat`（publish 核心 → 覆盖 `<槽>/core/` → `POST /api/service/reload`） | 进程内换核，**pid 不变** |
+| 4 | 宿主 / 契约 | `部署.ps1` → 铺空闲槽 → `启动.bat` | 进程重启 1–2 s |
+
+换核判据：`data/run/reload.result.json` 的 `ok=true` + pid 不变 + `/api/sites` 仍可查库。
+连续 3 次 ALC 未回收 → 宿主以退出码 3 自重启（内存归零，`core.state.json` 可见新 pid）。
 
 ## 运行
 
-双击 `启动.bat`（或命令行跑 `ApiSiteAnalyzer_A.exe serve`）。子命令：
+双击 `启动.bat`（或命令行在**仓库根**——config.json 所在目录——跑 `slot_A\ApiSiteAnalyzer.exe serve`）。子命令：
 
 ```
-ApiSiteAnalyzer_A.exe check            # 探测登录态（含真实余额）
-ApiSiteAnalyzer_A.exe fetch            # 增量拉取（追平历史即停）+ 口径快照入库
-ApiSiteAnalyzer_A.exe fetch --full     # 全量重扫到底（不提前停止）
-ApiSiteAnalyzer_A.exe serve            # 起面板（默认，双击 exe 等同）
-ApiSiteAnalyzer_A.exe stats            # 库内计数
-ApiSiteAnalyzer_A.exe sites            # 站点清单
-ApiSiteAnalyzer_A.exe probe            # 侦察（新站点接入用）：原始样本 + 分页实况 + 端点普查，落 data/probe/
+slot_A\ApiSiteAnalyzer.exe check            # 探测登录态（含真实余额）
+slot_A\ApiSiteAnalyzer.exe fetch            # 增量拉取（追平历史即停）+ 口径快照入库
+slot_A\ApiSiteAnalyzer.exe fetch --full     # 全量重扫到底（不提前停止）
+slot_A\ApiSiteAnalyzer.exe serve            # 起面板（默认，双击 exe 等同）
+slot_A\ApiSiteAnalyzer.exe stats            # 库内计数
+slot_A\ApiSiteAnalyzer.exe sites            # 站点清单
+slot_A\ApiSiteAnalyzer.exe probe            # 侦察（新站点接入用）：原始样本 + 分页实况 + 端点普查，落 data/probe/
 ```
 
 选项：`--site=<站点键>` 只跑该站（check / fetch / stats / probe 通用）；`--full` 见上。

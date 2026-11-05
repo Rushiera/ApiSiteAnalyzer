@@ -27,14 +27,23 @@ namespace ApiSiteAnalyzer.Web;
 /// </summary>
 public static class ServeRunner
 {
-    /// <summary>启动面板。</summary>
+    /// <summary>
+    /// 构建面板应用（建 Kestrel + 全部端点 + 后台采集，**不启动**）——启动与停止归 <c>ShellCore</c>。
+    /// <para>
+    /// 换核语义要求「建」与「跑」分离：宿主丢弃 Core 引用前先 <c>StopAsync</c>，新核心重新建一份。
+    /// </para>
+    /// </summary>
     /// <param name="config">配置。</param>
     /// <param name="sites">站点清单。</param>
     /// <param name="chromePath">chrome.exe 路径。</param>
     /// <param name="dataDir">数据目录。</param>
     /// <param name="ct">取消令牌。</param>
-    /// <returns>退出码。</returns>
-    public static async Task<int> RunAsync(AppConfig config, List<IApiSite> sites, string chromePath, string dataDir, CancellationToken ct)
+    /// <param name="openBrowser">true = 启动后打开浏览器（仅首次启动；换核不重开）。</param>
+    /// <param name="reloadRequestPath">换核申请文件（宿主心跳消费）。</param>
+    /// <param name="tokenPath">控制面令牌落盘路径（reload 鉴权）。</param>
+    /// <returns>未启动的 WebApplication。</returns>
+    public static WebApplication CreateApp(AppConfig config, List<IApiSite> sites, string chromePath, string dataDir,
+        CancellationToken ct, bool openBrowser, string reloadRequestPath, string tokenPath)
     {
         var settings = new PanelSettings(Path.Combine(dataDir, "settings.json"));
         var page = new PanelPage(dataDir);   // 单页文件化——改 data/web/index.html 刷新即生效，不用重编译
@@ -58,6 +67,18 @@ public static class ServeRunner
 
         WebApplication app = builder.Build();
         string token = Guid.NewGuid().ToString("N").Substring(0, 16);
+
+        // [段0a] 控制面令牌落盘——reload 端点复用同一枚令牌（同一进程内零新增鉴权面）；
+        //         手改令牌即可使旧令牌失效（下次换核重建）
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(tokenPath) ?? ".");
+            File.WriteAllText(tokenPath, token, new UTF8Encoding(false));
+        }
+        catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+        {
+            Console.Error.WriteLine("service.token 落盘失败（reload 将不可用）：" + ex.Message);
+        }
 
         // [段0] 运行期设置热读——手改 data/settings.json，下一次请求即生效；
         //       config.json 是部署期声明（端口 / 站点清单 / chrome 路径），改它仍须重启，不在此列
@@ -912,6 +933,53 @@ public static class ServeRunner
             });
         });
 
+        // [段7z] 进程内换核申请——写 reload.request，宿主心跳（5 s）消费；令牌复用控制面 token
+        app.MapPost("/api/service/reload", (HttpContext ctx) =>
+        {
+            string provided = ctx.Request.Headers["X-Reload-Token"].ToString();
+            if (provided.Length == 0)
+            {
+                provided = ctx.Request.Query["token"].ToString();
+            }
+
+            if (!string.Equals(provided, token, StringComparison.Ordinal))
+            {
+                return Results.Json(
+                    new { ok = false, error = "FORBIDDEN——需要 X-Reload-Token（值见 data/run/service.token）" },
+                    statusCode: 403);
+            }
+
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(reloadRequestPath) ?? ".");
+                File.WriteAllText(reloadRequestPath,
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " · pid=" + Environment.ProcessId,
+                    new UTF8Encoding(false));
+            }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+            {
+                return Results.Json(new { ok = false, error = "写 reload.request 失败：" + ex.Message }, statusCode: 500);
+            }
+
+            return Results.Json(new { ok = true, accepted = true, note = "宿主 5 秒内消费" }, statusCode: 202);
+        });
+
+        // [段7y] 核心自述——版本 / 端口 / 站点数 / 运行时长（换核后核对用；pid 归宿主快照）
+        app.MapGet("/api/service/state", () =>
+        {
+            var assembly = typeof(ServeRunner).Assembly;
+            string version = assembly.GetName().Version?.ToString() ?? "未知";
+            return Results.Json(new
+            {
+                ok = true,
+                coreVersion = version,
+                coreAssembly = assembly.Location,
+                port = config.Port,
+                sites = sites.Count,
+                pid = Environment.ProcessId,
+            });
+        });
+
         // [段8] 启动浏览器并打地址
         string url = "http://127.0.0.1:" + config.Port + "/";
         Console.WriteLine("ApiSiteAnalyzer 面板已启动：" + url);
@@ -920,10 +988,12 @@ public static class ServeRunner
 
         _ = collector.RunAsync(ct);
         _ = watch.RunAsync(ct);
-        OpenBrowser(url);
+        if (openBrowser)
+        {
+            OpenBrowser(url);
+        }
 
-        await app.RunAsync(ct).ConfigureAwait(false);
-        return 0;
+        return app;
     }
 
     /// <summary>本进程程序集版本（版本自证用）。</summary>

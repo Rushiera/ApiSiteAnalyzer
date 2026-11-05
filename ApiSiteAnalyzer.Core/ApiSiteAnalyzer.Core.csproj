@@ -1,0 +1,35 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>ApiSiteAnalyzer.Core</AssemblyName>
+    <!-- RootNamespace 保持 ApiSiteAnalyzer：业务源码的命名空间与内嵌资源名（ApiSiteAnalyzer.Web.wwwroot.index.html）都不变 -->
+    <RootNamespace>ApiSiteAnalyzer</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <GenerateDependencyFile>true</GenerateDependencyFile>
+    <!-- 类库默认不把 NuGet 依赖复制到输出——但核心是**独立加载单元**（影子副本要自带 Sqlite 全家），
+         故显式要求复制，否则 bin/Debug 下只有 Core.dll，新 ALC 里解析不到 Microsoft.Data.Sqlite -->
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <Version>0.26.3</Version>
+    <PublishDir>..\..\tools\CatTemp\asa-publish-core\</PublishDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ApiSiteAnalyzer.Contract\ApiSiteAnalyzer.Contract.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Web\wwwroot\index.html" />
+  </ItemGroup>
+
+</Project>
