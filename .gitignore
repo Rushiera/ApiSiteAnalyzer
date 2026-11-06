@@ -22,3 +22,6 @@ apis/
 # 部署产物：非单文件发布后槽位是**目录**（exe + dll + core/），由 部署.ps1 生成，不进仓
 slot_A/
 slot_B/
+
+# 缓存与中介区（mitm 抓包 / 临时产物，不进仓）
+/CatTemp/
