@@ -1,0 +1,32 @@
+{
+ "windowHours": 1,
+ "windowFrom": "11-12 15:10",
+ "windowTo": "11-12 16:10",
+ "requests": 1000,
+ "failed": 4,
+ "cacheHitPctWeighted": 98.41,
+ "lowCount": 59,
+ "lowCreditPct": 30.6,
+ "creditAll": 798.9,
+ "switches": 0,
+ "switchFirstAvgPct": 0,
+ "stuckConvs": 0,
+ "switchByReason": {},
+ "hourly": {
+  "11-12 15": {
+   "n": 899,
+   "low": 55,
+   "sw": 0
+  },
+  "11-12 16": {
+   "n": 101,
+   "low": 4,
+   "sw": 0
+  }
+ },
+ "verdict": {
+  "switches_ok": true,
+  "lowCredit_ok": false,
+  "stuck_ok": true
+ }
+}
